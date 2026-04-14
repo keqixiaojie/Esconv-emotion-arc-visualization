@@ -126,3 +126,158 @@ class VADExtractor:
         
         scores = [r[dimension] for r in results]
         return np.array(scores)
+
+
+# ---------------------------------------------------------------------------
+# 句粒度 VAD 预测（基于 RoBERTa 微调模型）
+# ---------------------------------------------------------------------------
+
+import os
+import re as _re
+import string as _string
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import RobertaModel, RobertaConfig, RobertaTokenizer
+
+
+def _find_snapshot(cache_root: str) -> str:
+    """返回 HF cache 目录中的 snapshot 路径"""
+    snapshots_dir = os.path.join(cache_root, "models--roberta-large", "snapshots")
+    if os.path.isdir(snapshots_dir):
+        snaps = os.listdir(snapshots_dir)
+        if snaps:
+            return os.path.join(snapshots_dir, snaps[0])
+    return cache_root
+
+
+class _VADRegressionModel(nn.Module):
+    """与训练端 PretrainedLMModel(task=vad-regression) 对齐的推理模型"""
+
+    def __init__(self, config, label_num):
+        super().__init__()
+        self.label_num = label_num
+        self.roberta = RobertaModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.projection_lm = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.head = nn.Linear(config.hidden_size, label_num * 3)
+        self.activation = nn.Sigmoid()
+        self.v_head = nn.Linear(label_num, 1, bias=False)
+        self.a_head = nn.Linear(label_num, 1, bias=False)
+        self.d_head = nn.Linear(label_num, 1, bias=False)
+
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.roberta(input_ids, attention_mask=attention_mask, return_dict=False)
+        hidden_states, pooled_output = outputs
+        pooled_output = self.dropout(pooled_output)
+        logits = self.head(pooled_output)
+        v_logit, a_logit, d_logit = torch.split(logits, self.label_num, dim=1)
+        v_out = self.v_head(self.activation(v_logit))
+        a_out = self.a_head(self.activation(a_logit))
+        d_out = self.d_head(self.activation(d_logit))
+        return torch.cat([v_out, a_out, d_out], dim=1)
+
+
+def _preprocess_text(text: str) -> str:
+    if not isinstance(text, str):
+        text = str(text) if text == text else ""
+    text = text.strip('"').strip("'").strip()
+    text = _re.sub(r"([{}])".format(_re.escape(_string.punctuation)), r" \1 ", text)
+    text = _re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+class SentenceVADPredictor:
+    """句粒度 VAD 预测器 - 使用 RoBERTa 微调模型对每个 utterance 预测 V/A/D"""
+
+    def __init__(self, ckpt_dir: str, config_cache: str, vocab_cache: str,
+                 epoch: int = 15, ckpt_prefix: str = "emobank-vad-regression",
+                 device: str = None):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        # 定位 checkpoint
+        ckpt_path = None
+        for f in os.listdir(ckpt_dir):
+            if f.startswith(ckpt_prefix) and f.endswith(f"-{epoch}.ckpt"):
+                ckpt_path = os.path.join(ckpt_dir, f)
+                break
+        if ckpt_path is None:
+            raise FileNotFoundError(
+                f"未找到 epoch={epoch} 的 checkpoint (prefix={ckpt_prefix}) in {ckpt_dir}")
+
+        # 加载 tokenizer
+        self.tokenizer = RobertaTokenizer.from_pretrained(_find_snapshot(vocab_cache))
+
+        # 加载模型
+        config = RobertaConfig.from_pretrained(_find_snapshot(config_cache))
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        state_dict = checkpoint["state_dict"]
+        label_num = state_dict["head.weight"].shape[0] // 3
+
+        self.model = _VADRegressionModel(config, label_num)
+        new_sd = {k.replace("pre_trained_lm.", "roberta."): v for k, v in state_dict.items()}
+        self.model.load_state_dict(new_sd, strict=False)
+        self.model.to(self.device)
+        self.model.eval()
+        print(f"✅ 句粒度模型已加载: {ckpt_path}  device={self.device}  label_num={label_num}")
+        # warmup: 跑一次空推理，让 CUDA kernel 预编译
+        self._warmup()
+
+    def _warmup(self):
+        """首次推理 warmup，避免回调超时"""
+        dummy = self.tokenizer(["warmup"], max_length=32, padding="max_length",
+                                truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            self.model(dummy["input_ids"].to(self.device),
+                       attention_mask=dummy["attention_mask"].to(self.device))
+        print("✅ 模型 warmup 完成")
+
+    def _predict_batch(self, texts: List[str], max_len: int = 256, batch_size: int = 32) -> np.ndarray:
+        all_preds = []
+        for i in range(0, len(texts), batch_size):
+            batch = [_preprocess_text(t) for t in texts[i:i + batch_size]]
+            enc = self.tokenizer(batch, max_length=max_len, padding="max_length",
+                                 truncation=True, return_tensors="pt")
+            input_ids = enc["input_ids"].to(self.device)
+            attn_mask = enc["attention_mask"].to(self.device)
+            with torch.no_grad():
+                logits = self.model(input_ids, attention_mask=attn_mask)
+                preds = F.relu(logits).cpu().numpy()
+            all_preds.append(preds)
+        return np.concatenate(all_preds, axis=0)
+
+    def predict_utterances(self, utterances: List[Dict]) -> List[Dict]:
+        """
+        对 utterance 列表做句级 VAD 预测，返回与词粒度 extract() 格式一致的结果。
+
+        Args:
+            utterances: esconv_loader.filter_utterances() 的输出
+
+        Returns:
+            List[Dict]: 每个元素 {term, valence, arousal, dominance, position, turn_info}
+        """
+        if not utterances:
+            return []
+        texts = [u['content'] for u in utterances]
+        preds = self._predict_batch(texts)  # 模型输出范围 1-5 (EmoBank)
+        results = []
+        for i, (u, vad) in enumerate(zip(utterances, preds)):
+            content = u['content']
+            # 将 EmoBank 1-5 范围映射到 -1~1: (x - 3) / 2
+            v_mapped = (float(vad[0]) - 3.0) / 2.0
+            a_mapped = (float(vad[1]) - 3.0) / 2.0
+            d_mapped = (float(vad[2]) - 3.0) / 2.0
+            results.append({
+                'term': content[:50] + ('...' if len(content) > 50 else ''),
+                'valence': v_mapped,
+                'arousal': a_mapped,
+                'dominance': d_mapped,
+                'position': i,
+                'turn_info': {
+                    'turn_index': u['turn_index'],
+                    'speaker': u['speaker'],
+                    'content': u['content'],
+                    'strategy': u.get('strategy'),
+                },
+            })
+        return results
