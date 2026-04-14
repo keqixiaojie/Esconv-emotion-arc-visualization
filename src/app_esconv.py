@@ -340,11 +340,22 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
             fig.update_layout(title=f"话语数({len(utterances or [])})<窗口({ws})")
             return fig, "话语数不足"
 
+        # 句粒度对齐词粒度 x 轴：计算每句的词位置区间
+        if is_sent:
+            word_counts_ctx = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances]
+            word_starts_ctx = []
+            cum = 0
+            for c in word_counts_ctx:
+                word_starts_ctx.append(cum)
+                cum += c
+
         # 离散：每条话语的 VAD 得分
         if is_sent:
             utt_scores = scores.copy()
             utt_cd = [r['turn_info']['turn_index'] if r.get('turn_info') else -1 for r in results]
             utt_ht = [f"T[{utt_cd[i]}] {dim[0].upper()}={utt_scores[i]:.3f}" for i in range(len(results))]
+            # 离散点画在词范围中点
+            xd_utt = [word_starts_ctx[i] + (word_counts_ctx[i] - 1) // 2 for i in range(len(results))]
         else:
             from collections import defaultdict
             groups = defaultdict(list)
@@ -352,17 +363,16 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
                 ti = r.get('turn_info')
                 if ti:
                     groups[ti['turn_index']].append(r[dim])
-            utt_scores_list, utt_ht, utt_cd = [], [], []
-            for u in utterances:
+            utt_scores_list, utt_ht, utt_cd, xd_utt = [], [], [], []
+            for i, u in enumerate(utterances):
                 tidx = u['turn_index']
                 vals = groups[tidx]
                 val = float(np.mean(vals)) if vals else 0.0
                 utt_scores_list.append(val)
                 utt_ht.append(f"T[{tidx}] {dim[0].upper()}={val:.3f} ({len(vals)} 词)")
                 utt_cd.append(tidx)
+                xd_utt.append(i)
             utt_scores = np.array(utt_scores_list)
-
-        xd_utt = list(range(len(utterances)))
 
         # 上文窗口：位置 i 取前 ws 条话语拼接为整体文本后统一打分
         ctx_scores_list, ctx_ht, ctx_cd = [], [], []
@@ -383,7 +393,13 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
             ctx_cd.append(utterances[i]['turn_index'])
 
         ctx_scores = np.array(ctx_scores_list)
-        xs_ctx = list(range(ws - 1, len(utterances)))
+        # 句粒度：平滑曲线从每句词起点开始（阶梯线）；词粒度：话语序号
+        if is_sent:
+            xs_ctx = [word_starts_ctx[i] for i in range(ws - 1, len(utterances))]
+            ctx_line_shape = 'hv'
+        else:
+            xs_ctx = list(range(ws - 1, len(utterances)))
+            ctx_line_shape = 'linear'
 
         discrete_name = '句离散' if is_sent else '词均值(轮次)'
         fig = go.Figure()
@@ -394,24 +410,25 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
         fig.add_trace(go.Scatter(
             x=xs_ctx, y=ctx_scores.tolist(), mode='lines+markers',
             name=f'{dim.capitalize()} 上文(W={ws})',
-            line=dict(color=clr.get(dim, 'crimson'), width=3), marker=dict(size=4),
+            line=dict(color=clr.get(dim, 'crimson'), width=3, shape=ctx_line_shape), marker=dict(size=4),
             text=ctx_ht, hoverinfo='text', customdata=ctx_cd))
         fig.add_hline(y=0.5, line_dash="dash", line_color="black", opacity=0.3)
 
-        # 拐点标记（x 轴为话语位置）
+        # 拐点标记
         if markers and len(utt_scores) > 0:
             y_max = float(max(utt_scores)) + 0.05
             mk_x, mk_y, mk_text, mk_color = [], [], [], []
             for m in markers:
                 if m['speaker'] not in mf: continue
                 mt = m['turn']; ms = m['speaker']; ml = m.get('label', '')
-                x_pos = [i for i, u in enumerate(utterances) if u['turn_index'] == mt]
-                if not x_pos:
+                sent_pos = [i for i, u in enumerate(utterances) if u['turn_index'] == mt]
+                if not sent_pos:
                     all_t = [(i, u['turn_index']) for i, u in enumerate(utterances)]
                     if not all_t: continue
-                    mid_x = min(all_t, key=lambda t: abs(t[1] - mt))[0]
+                    si = min(all_t, key=lambda t: abs(t[1] - mt))[0]
                 else:
-                    mid_x = x_pos[0]
+                    si = sent_pos[0]
+                mid_x = (word_starts_ctx[si] + (word_counts_ctx[si] - 1) // 2) if is_sent else si
                 mc = MARKER_COLORS.get(ms, '#9c27b0')
                 fig.add_vline(x=mid_x, line_dash='dash' if ms == 'seeker' else 'dot',
                               line_color=mc, opacity=0.5, line_width=2)
@@ -431,7 +448,7 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
         gran_tag = "句粒度" if is_sent else "词粒度"
         fig.update_layout(
             title=f"#{cache.get('conv_id','?')} | {cache.get('speaker','?')} | {dim.capitalize()} | {gran_tag} | 上文窗口",
-            xaxis_title="话语索引", yaxis_title=f"{dim.capitalize()}",
+            xaxis_title="情感词索引", yaxis_title=f"{dim.capitalize()}",
             yaxis=dict(range=[-1, 1]),
             hovermode="closest", height=530, margin=dict(l=40, r=20, t=45, b=35),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
