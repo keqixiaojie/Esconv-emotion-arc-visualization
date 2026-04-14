@@ -142,14 +142,20 @@ import torch.nn.functional as F
 from transformers import RobertaModel, RobertaConfig, RobertaTokenizer
 
 
-def _find_snapshot(cache_root: str) -> str:
-    """返回 HF cache 目录中的 snapshot 路径"""
-    snapshots_dir = os.path.join(cache_root, "models--roberta-large", "snapshots")
+_ROBERTA_MODEL_NAME = "roberta-large"
+
+def _resolve_pretrained(cache_root: str) -> str:
+    """
+    优先使用本地 HF 缓存（snapshots 目录），
+    若不存在则返回模型名称让 from_pretrained 联网下载到 cache_root。
+    """
+    snapshots_dir = os.path.join(cache_root, f"models--{_ROBERTA_MODEL_NAME}", "snapshots")
     if os.path.isdir(snapshots_dir):
         snaps = os.listdir(snapshots_dir)
         if snaps:
             return os.path.join(snapshots_dir, snaps[0])
-    return cache_root
+    print(f"⬇️ 本地未找到 {_ROBERTA_MODEL_NAME} 缓存，将从 HuggingFace 下载到 {cache_root} ...")
+    return _ROBERTA_MODEL_NAME
 
 
 class _VADRegressionModel(nn.Module):
@@ -205,11 +211,17 @@ class SentenceVADPredictor:
             raise FileNotFoundError(
                 f"未找到 epoch={epoch} 的 checkpoint (prefix={ckpt_prefix}) in {ckpt_dir}")
 
-        # 加载 tokenizer
-        self.tokenizer = RobertaTokenizer.from_pretrained(_find_snapshot(vocab_cache))
+        # 加载 tokenizer（本地缓存命中则离线，否则联网下载）
+        vocab_path = _resolve_pretrained(vocab_cache)
+        self.tokenizer = RobertaTokenizer.from_pretrained(
+            vocab_path,
+            cache_dir=vocab_cache if vocab_path == _ROBERTA_MODEL_NAME else None)
 
-        # 加载模型
-        config = RobertaConfig.from_pretrained(_find_snapshot(config_cache))
+        # 加载模型 config
+        config_path = _resolve_pretrained(config_cache)
+        config = RobertaConfig.from_pretrained(
+            config_path,
+            cache_dir=config_cache if config_path == _ROBERTA_MODEL_NAME else None)
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         state_dict = checkpoint["state_dict"]
         label_num = state_dict["head.weight"].shape[0] // 3
