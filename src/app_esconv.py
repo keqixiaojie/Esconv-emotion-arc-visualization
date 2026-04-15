@@ -120,9 +120,11 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '8px', 'fontSize': '13px'}),
     html.Div([
         html.Div([
-            dcc.Graph(id='graph-valence'),
-            dcc.Graph(id='graph-arousal'),
-            dcc.Graph(id='graph-dominance'),
+            dcc.Loading(type='circle', color='#666', children=[
+                dcc.Graph(id='graph-valence'),
+                dcc.Graph(id='graph-arousal'),
+                dcc.Graph(id='graph-dominance'),
+            ])
         ], style={'width': '58%', 'display': 'inline-block', 'verticalAlign': 'top'}),
         html.Div([
             html.Div([
@@ -135,7 +137,9 @@ app.layout = html.Div([
                 'borderRadius': '6px', 'fontSize': '12px'})
         ], style={'width': '40%', 'display': 'inline-block', 'verticalAlign': 'top', 'marginLeft': '2%'})
     ]),
-    html.Div(id='status-info', style={'padding': '4px 12px', 'color': '#666', 'fontSize': '12px'}),
+    dcc.Loading(type='dot', color='#888', children=[
+        html.Div(id='status-info', style={'padding': '4px 12px', 'color': '#666', 'fontSize': '12px'})
+    ]),
     # 标签编辑弹窗
     dcc.Store(id='editing-turn', data=None),
     html.Div(id='label-modal-container', children=[
