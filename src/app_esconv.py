@@ -85,14 +85,6 @@ app.layout = html.Div([
                 value='seeker', labelStyle={'display': 'inline-block', 'marginRight': '8px'})
         ], style={'display': 'inline-block', 'marginRight': '25px', 'verticalAlign': 'top'}),
         html.Div([
-            html.Label("维度:", style={'fontWeight': 'bold'}),
-            dcc.RadioItems(id='dim-radio',
-                options=[{'label': 'V', 'value': 'valence'},
-                         {'label': 'A', 'value': 'arousal'},
-                         {'label': 'D', 'value': 'dominance'}],
-                value='valence', labelStyle={'display': 'inline-block', 'marginRight': '8px'})
-        ], style={'display': 'inline-block', 'marginRight': '25px', 'verticalAlign': 'top'}),
-        html.Div([
             html.Label("显示拐点:", style={'fontWeight': 'bold'}),
             dcc.Checklist(id='marker-filter',
                 options=[{'label': ' 🟢 Seeker', 'value': 'seeker'},
@@ -127,15 +119,18 @@ app.layout = html.Div([
     html.Div(id='meta-info', style={'padding': '8px 12px', 'backgroundColor': '#e9ecef',
         'borderRadius': '8px', 'marginBottom': '8px', 'fontSize': '13px'}),
     html.Div([
-        html.Div([dcc.Graph(id='emotion-arc-graph', style={'height': '550px'})],
-            style={'width': '58%', 'display': 'inline-block', 'verticalAlign': 'top'}),
+        html.Div([
+            dcc.Graph(id='graph-valence'),
+            dcc.Graph(id='graph-arousal'),
+            dcc.Graph(id='graph-dominance'),
+        ], style={'width': '58%', 'display': 'inline-block', 'verticalAlign': 'top'}),
         html.Div([
             html.Div([
                 html.Span("📜 对话内容", style={'fontSize': '15px', 'fontWeight': 'bold'}),
                 html.Span(" (点击: 新增标记 / 编辑已有标记)", style={'fontSize': '11px', 'color': '#888'}),
             ], style={'marginBottom': '8px'}),
             html.Div(id='dialog-panel', style={
-                'maxHeight': '550px', 'overflowY': 'auto', 'padding': '8px',
+                'maxHeight': '800px', 'overflowY': 'auto', 'padding': '8px',
                 'backgroundColor': '#fafafa', 'border': '1px solid #ddd',
                 'borderRadius': '6px', 'fontSize': '12px'})
         ], style={'width': '40%', 'display': 'inline-block', 'verticalAlign': 'top', 'marginLeft': '2%'})
@@ -309,16 +304,7 @@ def update_smooth_mode_options(granularity, current_mode):
     return options, value
 
 
-@app.callback(
-    Output('emotion-arc-graph', 'figure'),
-    Output('status-info', 'children'),
-    Input('dim-radio', 'value'),
-    Input('window-slider', 'value'),
-    Input('smooth-mode-radio', 'value'),
-    Input('vad-cache-store', 'data'),
-    Input('markers-store', 'data'),
-    Input('marker-filter', 'value'))
-def update_graph(dim, ws, smooth_mode, cache, markers, mf):
+def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     if not cache or not cache.get('results'):
         fig = go.Figure(); fig.update_layout(title="暂无数据"); return fig, "暂无数据"
     results = cache['results']
@@ -412,11 +398,11 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
             name=f'{dim.capitalize()} 上文(W={ws})',
             line=dict(color=clr.get(dim, 'crimson'), width=3, shape=ctx_line_shape), marker=dict(size=4),
             text=ctx_ht, hoverinfo='text', customdata=ctx_cd))
-        fig.add_hline(y=0.5, line_dash="dash", line_color="black", opacity=0.3)
+        fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
 
         # 拐点标记
         if markers and len(utt_scores) > 0:
-            y_max = float(max(utt_scores)) + 0.05
+            y_max = 1.0
             mk_x, mk_y, mk_text, mk_color = [], [], [], []
             for m in markers:
                 if m['speaker'] not in mf: continue
@@ -435,7 +421,7 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
                 icon = MARKER_ICONS.get(ms, '📌')
                 fig.add_annotation(x=mid_x, y=y_max, text=f"{icon}T{mt}", showarrow=False,
                     font=dict(size=9, color=mc))
-                mk_x.append(mid_x); mk_y.append(y_max + 0.03)
+                mk_x.append(mid_x); mk_y.append(y_max)
                 hover_label = f"<b>{icon} 轮次[{mt}] {ms}</b>"
                 if ml: hover_label += f"<br>📝 {ml}"
                 else: hover_label += "<br><i>(无标签)</i>"
@@ -450,7 +436,7 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
             title=f"#{cache.get('conv_id','?')} | {cache.get('speaker','?')} | {dim.capitalize()} | {gran_tag} | 上文窗口",
             xaxis_title="情感词索引", yaxis_title=f"{dim.capitalize()}",
             yaxis=dict(range=[-1, 1]),
-            hovermode="closest", height=530, margin=dict(l=40, r=20, t=45, b=35),
+            hovermode="closest", height=260, margin=dict(l=40, r=20, t=35, b=25),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         shown = len([m for m in (markers or []) if m['speaker'] in mf])
         return fig, f"✅ {len(utterances)}话语 | W={ws} | 弧线{len(ctx_scores)} | 拐点{shown}/{len(markers or [])} | {gran_tag} | 上文窗口"
@@ -515,10 +501,10 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
         name=f'{dim.capitalize()} (W={ws})',
         line=dict(color=clr.get(dim, 'crimson'), width=3, shape=smooth_line_shape), marker=dict(size=4),
         text=ht_s, hoverinfo='text', customdata=cd_s))
-    fig.add_hline(y=0.5, line_dash="dash", line_color="black", opacity=0.3)
+    fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
     # 拐点标记：竖线 + 可hover的散点（显示标签）
     if markers:
-        y_max = float(max(scores)) + 0.05
+        y_max = 1.0
         mk_x, mk_y, mk_text, mk_color = [], [], [], []
         for m in markers:
             if m['speaker'] not in mf: continue
@@ -548,7 +534,7 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
             icon = MARKER_ICONS.get(ms, '📌')
             fig.add_annotation(x=mid_x, y=y_max, text=f"{icon}T{mt}", showarrow=False,
                 font=dict(size=9, color=mc))
-            mk_x.append(mid_x); mk_y.append(y_max + 0.03)
+            mk_x.append(mid_x); mk_y.append(y_max)
             hover_label = f"<b>{icon} 轮次[{mt}] {ms}</b>"
             if ml: hover_label += f"<br>📝 {ml}"
             else: hover_label += "<br><i>(无标签)</i>"
@@ -562,18 +548,39 @@ def update_graph(dim, ws, smooth_mode, cache, markers, mf):
         title=f"#{cache.get('conv_id','?')} | {cache.get('speaker','?')} | {dim.capitalize()} | {gran_tag}",
         xaxis_title="情感词索引", yaxis_title=f"{dim.capitalize()}",
         yaxis=dict(range=[-1, 1]),
-        hovermode="closest", height=530, margin=dict(l=40, r=20, t=45, b=35),
+        hovermode="closest", height=260, margin=dict(l=40, r=20, t=35, b=25),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     shown = len([m for m in (markers or []) if m['speaker'] in mf])
     return fig, f"✅ {len(results)}{unit_label} | W={ws} | 弧线{len(smooth)} | 拐点{shown}/{len(markers or [])} | {gran_tag}"
 
 
 @app.callback(
+    Output('graph-valence', 'figure'),
+    Output('graph-arousal', 'figure'),
+    Output('graph-dominance', 'figure'),
+    Output('status-info', 'children'),
+    Input('window-slider', 'value'),
+    Input('smooth-mode-radio', 'value'),
+    Input('vad-cache-store', 'data'),
+    Input('markers-store', 'data'),
+    Input('marker-filter', 'value'))
+def update_graphs(ws, smooth_mode, cache, markers, mf):
+    figs, status = [], "暂无数据"
+    for dim in ['valence', 'arousal', 'dominance']:
+        fig, status = _build_figure(dim, ws, smooth_mode, cache, markers, mf)
+        figs.append(fig)
+    return figs[0], figs[1], figs[2], status
+
+
+@app.callback(
     Output('dialog-panel', 'children'),
-    Input('emotion-arc-graph', 'hoverData'),
+    Input('graph-valence', 'hoverData'),
+    Input('graph-arousal', 'hoverData'),
+    Input('graph-dominance', 'hoverData'),
     Input('vad-cache-store', 'data'),
     Input('markers-store', 'data'))
-def on_hover_dialog(hoverData, cache, markers):
+def on_hover_dialog(hoverV, hoverA, hoverD, cache, markers):
+    hoverData = hoverV or hoverA or hoverD
     if not cache or not cache.get('dialog'): return []
     dialog = cache['dialog']; results = cache.get('results', [])
     markers = markers or []; mm = {m['turn']: m for m in markers}
