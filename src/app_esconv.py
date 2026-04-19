@@ -402,35 +402,48 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         discrete_name = '句离散' if is_sent else '词均值(轮次)'
         fig = go.Figure()
 
-        # 背景说话者弧线（浅色，上文窗口模式）
+        # 背景说话者离散点（上文窗口模式，与主图同样的上文窗口计算方式）
         bg_spk_ctx = cache.get('bg_speaker', '')
-        bg_results_ctx = cache.get('bg_results', [])
         bg_utts_ctx = cache.get('bg_utterances', [])
-        if bg_spk_ctx and bg_results_ctx and len(bg_utts_ctx) >= ws:
-            bg_raw_ctx = np.array([r[dim] for r in bg_results_ctx])
+        if bg_spk_ctx and bg_utts_ctx and len(bg_utts_ctx) >= ws:
+            bg_ctx_scores, bg_ctx_cd = [], []
+            for i in range(ws - 1, len(bg_utts_ctx)):
+                window_utts = bg_utts_ctx[i - ws + 1 : i + 1]
+                combined = ' '.join(u['content'] for u in window_utts)
+                if is_sent and sent_predictor is not None:
+                    preds = sent_predictor._predict_batch([combined])
+                    dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
+                    val = (float(preds[0][dim_idx]) - 3.0) / 2.0
+                else:
+                    wr = vad_extractor.extract(combined)
+                    val = float(np.mean([r[dim] for r in wr])) if wr else 0.0
+                bg_ctx_scores.append(val)
+                bg_ctx_cd.append(bg_utts_ctx[i]['turn_index'])
+            # 建立主说话者 turn_index → x 的映射
             if is_sent:
-                bg_sm_input_ctx = bg_raw_ctx
+                ctx_turn_x = {utterances[i]['turn_index']: word_starts_ctx[i]
+                              for i in range(len(utterances))}
             else:
-                from collections import defaultdict as _dd2
-                _bg_grp2 = _dd2(list)
-                for r in bg_results_ctx:
-                    ti = r.get('turn_info')
-                    if ti: _bg_grp2[ti['turn_index']].append(r[dim])
-                bg_sm_input_ctx = np.array([
-                    float(np.mean(_bg_grp2[u['turn_index']])) if _bg_grp2[u['turn_index']] else 0.0
-                    for u in bg_utts_ctx
-                ])
-            if len(bg_sm_input_ctx) >= ws:
-                bg_smooth_ctx = smooth_scores(bg_sm_input_ctx, ws)
-                max_x_ctx = max(xd_utt) if xd_utt else 0
-                n_bg_ctx = len(bg_smooth_ctx)
-                xs_bg_ctx = [i / (n_bg_ctx - 1) * max_x_ctx for i in range(n_bg_ctx)] if n_bg_ctx > 1 else [max_x_ctx / 2]
-                bg_color_ctx = 'rgba(33,150,243,0.25)' if bg_spk_ctx == 'supporter' else 'rgba(76,175,80,0.25)'
+                ctx_turn_x = {utterances[i]['turn_index']: i for i in range(len(utterances))}
+            ctx_turn_keys = sorted(ctx_turn_x.keys())
+            bg_ctx_x, bg_ctx_y, bg_ctx_text = [], [], []
+            for val, T in zip(bg_ctx_scores, bg_ctx_cd):
+                if not ctx_turn_keys: continue
+                lo = max((k for k in ctx_turn_keys if k <= T), default=ctx_turn_keys[0])
+                hi = min((k for k in ctx_turn_keys if k >= T), default=ctx_turn_keys[-1])
+                x_pos = ctx_turn_x[lo] if lo == hi else (
+                    ctx_turn_x[lo] + (T - lo) / (hi - lo) * (ctx_turn_x[hi] - ctx_turn_x[lo]))
+                bg_ctx_x.append(x_pos)
+                bg_ctx_y.append(val)
+                bg_ctx_text.append(f"T[{T}] {bg_spk_ctx} {dim[0].upper()}={val:.3f}")
+            if bg_ctx_x:
+                bg_color_ctx_dot = '#2196F3' if bg_spk_ctx == 'supporter' else '#4CAF50'
                 fig.add_trace(go.Scatter(
-                    x=xs_bg_ctx, y=bg_smooth_ctx.tolist(), mode='lines',
-                    name=f'{bg_spk_ctx.capitalize()} (W={ws})',
-                    line=dict(color=bg_color_ctx, width=2, shape=ctx_line_shape),
-                    hoverinfo='skip'))
+                    x=bg_ctx_x, y=bg_ctx_y, mode='markers',
+                    name=bg_spk_ctx.capitalize(),
+                    marker=dict(size=7, color=bg_color_ctx_dot, opacity=0.6,
+                                symbol='circle', line=dict(width=1, color='white')),
+                    text=bg_ctx_text, hoverinfo='text'))
 
         fig.add_trace(go.Scatter(
             x=xd_utt, y=utt_scores.tolist(), mode='markers+lines', name=discrete_name,
@@ -538,35 +551,55 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     discrete_name = '离散句' if is_sent else '离散词'
     fig = go.Figure()
 
-    # 背景说话者弧线（浅色）
+    # 背景说话者离散点（每句话在主图 x 轴上插值定位）
     bg_spk = cache.get('bg_speaker', '')
     bg_results_c = cache.get('bg_results', [])
     bg_utts_c = cache.get('bg_utterances', [])
-    if bg_spk and bg_results_c and len(bg_results_c) >= ws:
-        bg_raw = np.array([r[dim] for r in bg_results_c])
+    if bg_spk and bg_results_c and bg_utts_c and len(bg_utts_c) >= ws:
+        # bg 话语序列逐句 VAD，与主图同样方式平滑
         if is_sent:
-            bg_sm_input = bg_raw
+            bg_utt_scores = np.array([r[dim] for r in bg_results_c])
         else:
             from collections import defaultdict as _dd
             _bg_grp = _dd(list)
             for r in bg_results_c:
                 ti = r.get('turn_info')
                 if ti: _bg_grp[ti['turn_index']].append(r[dim])
-            bg_sm_input = np.array([
+            bg_utt_scores = np.array([
                 float(np.mean(_bg_grp[u['turn_index']])) if _bg_grp[u['turn_index']] else 0.0
-                for u in bg_utts_c
-            ])
-        if len(bg_sm_input) >= ws:
-            bg_smooth_v = smooth_scores(bg_sm_input, ws)
-            max_x = max(xd) if xd else (len(scores) - 1)
-            n_bg = len(bg_smooth_v)
-            xs_bg = [i / (n_bg - 1) * max_x for i in range(n_bg)] if n_bg > 1 else [max_x / 2]
-            bg_color = 'rgba(33,150,243,0.25)' if bg_spk == 'supporter' else 'rgba(76,175,80,0.25)'
+                for u in bg_utts_c])
+        bg_smooth_v = smooth_scores(bg_utt_scores, ws)
+        # 建立主说话者 turn_index → x 位置的映射
+        if is_sent:
+            main_turn_x = {results[i]['turn_info']['turn_index']: word_starts[i]
+                           for i in range(len(results)) if results[i].get('turn_info')}
+        else:
+            main_turn_x = {}
+            for i, r in enumerate(results):
+                ti = r.get('turn_info')
+                if ti and ti['turn_index'] not in main_turn_x:
+                    main_turn_x[ti['turn_index']] = i
+        turn_keys = sorted(main_turn_x.keys())
+        bg_dots_x, bg_dots_y, bg_dots_text = [], [], []
+        for j, bg_val in enumerate(bg_smooth_v):
+            u = bg_utts_c[j + ws - 1]
+            T = u['turn_index']
+            if not turn_keys: continue
+            lo = max((k for k in turn_keys if k <= T), default=turn_keys[0])
+            hi = min((k for k in turn_keys if k >= T), default=turn_keys[-1])
+            x_pos = main_turn_x[lo] if lo == hi else (
+                main_turn_x[lo] + (T - lo) / (hi - lo) * (main_turn_x[hi] - main_turn_x[lo]))
+            bg_dots_x.append(x_pos)
+            bg_dots_y.append(float(bg_val))
+            bg_dots_text.append(f"T[{T}] {bg_spk} {dim[0].upper()}={bg_val:.3f}")
+        if bg_dots_x:
+            bg_color_dot = '#2196F3' if bg_spk == 'supporter' else '#4CAF50'
             fig.add_trace(go.Scatter(
-                x=xs_bg, y=bg_smooth_v.tolist(), mode='lines',
-                name=f'{bg_spk.capitalize()} (W={ws})',
-                line=dict(color=bg_color, width=2, shape=smooth_line_shape),
-                hoverinfo='skip'))
+                x=bg_dots_x, y=bg_dots_y, mode='markers',
+                name=bg_spk.capitalize(),
+                marker=dict(size=7, color=bg_color_dot, opacity=0.6,
+                            symbol='circle', line=dict(width=1, color='white')),
+                text=bg_dots_text, hoverinfo='text'))
 
     fig.add_trace(go.Scatter(x=xd, y=scores.tolist(), mode='markers+lines', name=discrete_name,
         line=dict(dash='dot', color='rgba(150,150,150,0.5)'), marker=dict(size=6, color='gray'),
