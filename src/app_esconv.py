@@ -210,25 +210,33 @@ def on_conv_change(conv_id, speaker, granularity):
     utterances = esconv_loader.filter_utterances(dialog, speaker)
     if not utterances: return None, meta_el, get_conv_markers(conv_id)
 
-    if granularity == 'sentence' and sent_predictor is not None:
-        # 句粒度：模型推理
-        vad_results = sent_predictor.predict_utterances(utterances)
-        cache = {'conv_id': conv_id, 'speaker': speaker, 'granularity': 'sentence',
-                 'results': vad_results, 'dialog': dialog, 'utterances': utterances}
-        cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}_sent.json")
-        vad_extractor.save_cache(vad_results, cp,
-                                 metadata={'conv_id': conv_id, 'speaker': speaker, 'granularity': 'sentence'})
-    else:
-        # 词粒度：NRC 词典
-        text = esconv_loader.utterances_to_text(utterances)
-        vad_results = vad_extractor.extract(text)
-        tm = esconv_loader.build_turn_mapping(utterances, vad_results)
-        for i, v in enumerate(vad_results):
+    def _compute_vad(utts):
+        if granularity == 'sentence' and sent_predictor is not None:
+            return sent_predictor.predict_utterances(utts), 'sentence'
+        text = esconv_loader.utterances_to_text(utts)
+        vad_r = vad_extractor.extract(text)
+        tm = esconv_loader.build_turn_mapping(utts, vad_r)
+        for i, v in enumerate(vad_r):
             v['turn_info'] = tm[i] if i < len(tm) and tm[i] else None
-        cache = {'conv_id': conv_id, 'speaker': speaker, 'granularity': 'word',
-                 'results': vad_results, 'dialog': dialog, 'utterances': utterances}
-        cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}.json")
-        vad_extractor.save_cache(vad_results, cp, metadata={'conv_id': conv_id, 'speaker': speaker})
+        return vad_r, 'word'
+
+    vad_results, actual_gran = _compute_vad(utterances)
+    suffix = '_sent' if actual_gran == 'sentence' else ''
+    cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}{suffix}.json")
+    vad_extractor.save_cache(vad_results, cp, metadata={'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran})
+
+    cache = {'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran,
+             'results': vad_results, 'dialog': dialog, 'utterances': utterances}
+
+    # 同时计算背景说话者的弧线
+    bg_spk = 'supporter' if speaker == 'seeker' else ('seeker' if speaker == 'supporter' else None)
+    if bg_spk:
+        bg_utts = esconv_loader.filter_utterances(dialog, bg_spk)
+        if bg_utts:
+            bg_results, _ = _compute_vad(bg_utts)
+            cache['bg_speaker'] = bg_spk
+            cache['bg_results'] = bg_results
+            cache['bg_utterances'] = bg_utts
 
     return cache, meta_el, get_conv_markers(conv_id)
 
@@ -393,6 +401,37 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
 
         discrete_name = '句离散' if is_sent else '词均值(轮次)'
         fig = go.Figure()
+
+        # 背景说话者弧线（浅色，上文窗口模式）
+        bg_spk_ctx = cache.get('bg_speaker', '')
+        bg_results_ctx = cache.get('bg_results', [])
+        bg_utts_ctx = cache.get('bg_utterances', [])
+        if bg_spk_ctx and bg_results_ctx and len(bg_utts_ctx) >= ws:
+            bg_raw_ctx = np.array([r[dim] for r in bg_results_ctx])
+            if is_sent:
+                bg_sm_input_ctx = bg_raw_ctx
+            else:
+                from collections import defaultdict as _dd2
+                _bg_grp2 = _dd2(list)
+                for r in bg_results_ctx:
+                    ti = r.get('turn_info')
+                    if ti: _bg_grp2[ti['turn_index']].append(r[dim])
+                bg_sm_input_ctx = np.array([
+                    float(np.mean(_bg_grp2[u['turn_index']])) if _bg_grp2[u['turn_index']] else 0.0
+                    for u in bg_utts_ctx
+                ])
+            if len(bg_sm_input_ctx) >= ws:
+                bg_smooth_ctx = smooth_scores(bg_sm_input_ctx, ws)
+                max_x_ctx = max(xd_utt) if xd_utt else 0
+                n_bg_ctx = len(bg_smooth_ctx)
+                xs_bg_ctx = [i / (n_bg_ctx - 1) * max_x_ctx for i in range(n_bg_ctx)] if n_bg_ctx > 1 else [max_x_ctx / 2]
+                bg_color_ctx = 'rgba(33,150,243,0.25)' if bg_spk_ctx == 'supporter' else 'rgba(76,175,80,0.25)'
+                fig.add_trace(go.Scatter(
+                    x=xs_bg_ctx, y=bg_smooth_ctx.tolist(), mode='lines',
+                    name=f'{bg_spk_ctx.capitalize()} (W={ws})',
+                    line=dict(color=bg_color_ctx, width=2, shape=ctx_line_shape),
+                    hoverinfo='skip'))
+
         fig.add_trace(go.Scatter(
             x=xd_utt, y=utt_scores.tolist(), mode='markers+lines', name=discrete_name,
             line=dict(dash='dot', color='rgba(150,150,150,0.5)'), marker=dict(size=6, color='gray'),
@@ -498,6 +537,37 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
 
     discrete_name = '离散句' if is_sent else '离散词'
     fig = go.Figure()
+
+    # 背景说话者弧线（浅色）
+    bg_spk = cache.get('bg_speaker', '')
+    bg_results_c = cache.get('bg_results', [])
+    bg_utts_c = cache.get('bg_utterances', [])
+    if bg_spk and bg_results_c and len(bg_results_c) >= ws:
+        bg_raw = np.array([r[dim] for r in bg_results_c])
+        if is_sent:
+            bg_sm_input = bg_raw
+        else:
+            from collections import defaultdict as _dd
+            _bg_grp = _dd(list)
+            for r in bg_results_c:
+                ti = r.get('turn_info')
+                if ti: _bg_grp[ti['turn_index']].append(r[dim])
+            bg_sm_input = np.array([
+                float(np.mean(_bg_grp[u['turn_index']])) if _bg_grp[u['turn_index']] else 0.0
+                for u in bg_utts_c
+            ])
+        if len(bg_sm_input) >= ws:
+            bg_smooth_v = smooth_scores(bg_sm_input, ws)
+            max_x = max(xd) if xd else (len(scores) - 1)
+            n_bg = len(bg_smooth_v)
+            xs_bg = [i / (n_bg - 1) * max_x for i in range(n_bg)] if n_bg > 1 else [max_x / 2]
+            bg_color = 'rgba(33,150,243,0.25)' if bg_spk == 'supporter' else 'rgba(76,175,80,0.25)'
+            fig.add_trace(go.Scatter(
+                x=xs_bg, y=bg_smooth_v.tolist(), mode='lines',
+                name=f'{bg_spk.capitalize()} (W={ws})',
+                line=dict(color=bg_color, width=2, shape=smooth_line_shape),
+                hoverinfo='skip'))
+
     fig.add_trace(go.Scatter(x=xd, y=scores.tolist(), mode='markers+lines', name=discrete_name,
         line=dict(dash='dot', color='rgba(150,150,150,0.5)'), marker=dict(size=6, color='gray'),
         text=ht_d, hoverinfo='text', customdata=cd_d))
