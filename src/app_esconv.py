@@ -403,6 +403,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         fig = go.Figure()
 
         # 背景说话者离散点（上文窗口模式，与主图同样的上文窗口计算方式）
+        bg_ctx_turn_to_x = {}
         bg_spk_ctx = cache.get('bg_speaker', '')
         bg_utts_ctx = cache.get('bg_utterances', [])
         if bg_spk_ctx and bg_utts_ctx and len(bg_utts_ctx) >= ws:
@@ -434,10 +435,12 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                 if main_idx >= len(utterances): continue
                 x_base = float(word_starts_ctx[main_idx]) if is_sent else float(main_idx)
                 for k, (val, T_bg) in enumerate(bg_ctx_groups[main_idx]):
-                    bg_ctx_x.append(x_base + k)
+                    x_dot = x_base + k
+                    bg_ctx_x.append(x_dot)
                     bg_ctx_y.append(val)
                     bg_ctx_text.append(f"T[{T_bg}] {bg_spk_ctx} {dim[0].upper()}={val:.3f}")
                     bg_ctx_cd.append(T_bg)
+                    bg_ctx_turn_to_x[T_bg] = x_dot
 
             if bg_ctx_x:
                 bg_color_ctx_dot = '#2196F3' if bg_spk_ctx == 'supporter' else '#4CAF50'
@@ -467,14 +470,17 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
             for m in markers:
                 if m['speaker'] not in mf: continue
                 mt = m['turn']; ms = m['speaker']; ml = m.get('label', '')
-                sent_pos = [i for i, u in enumerate(utterances) if u['turn_index'] == mt]
-                if not sent_pos:
-                    all_t = [(i, u['turn_index']) for i, u in enumerate(utterances)]
-                    if not all_t: continue
-                    si = min(all_t, key=lambda t: abs(t[1] - mt))[0]
+                if ms == bg_spk_ctx and mt in bg_ctx_turn_to_x:
+                    mid_x = bg_ctx_turn_to_x[mt]
                 else:
-                    si = sent_pos[0]
-                mid_x = (word_starts_ctx[si] + (word_counts_ctx[si] - 1) // 2) if is_sent else si
+                    sent_pos = [i for i, u in enumerate(utterances) if u['turn_index'] == mt]
+                    if not sent_pos:
+                        all_t = [(i, u['turn_index']) for i, u in enumerate(utterances)]
+                        if not all_t: continue
+                        si = min(all_t, key=lambda t: abs(t[1] - mt))[0]
+                    else:
+                        si = sent_pos[0]
+                    mid_x = (word_starts_ctx[si] + (word_counts_ctx[si] - 1) // 2) if is_sent else si
                 mc = MARKER_COLORS.get(ms, '#9c27b0')
                 fig.add_vline(x=mid_x, line_dash='dash' if ms == 'seeker' else 'dot',
                               line_color=mc, opacity=0.5, line_width=2)
@@ -556,6 +562,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     fig = go.Figure()
 
     # 背景说话者离散点（每句话在主图 x 轴上插值定位）
+    bg_turn_to_x = {}
     bg_spk = cache.get('bg_speaker', '')
     bg_results_c = cache.get('bg_results', [])
     bg_utts_c = cache.get('bg_utterances', [])
@@ -585,6 +592,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
             bg_groups[next_idx].append((float(bg_val), T_bg))
 
         bg_dots_x, bg_dots_y, bg_dots_text, bg_dots_cd = [], [], [], []
+        bg_turn_to_x = {}
         for main_idx in sorted(bg_groups.keys()):
             if main_idx >= len(utterances): continue
             if is_sent:
@@ -595,10 +603,12 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                                if r.get('turn_info') and r['turn_info']['turn_index'] == T_main), None)
                 if x_base is None: continue
             for k, (bg_val, T_bg) in enumerate(bg_groups[main_idx]):
-                bg_dots_x.append(x_base + k)
+                x_dot = x_base + k
+                bg_dots_x.append(x_dot)
                 bg_dots_y.append(bg_val)
                 bg_dots_text.append(f"T[{T_bg}] {bg_spk} {dim[0].upper()}={bg_val:.3f}")
                 bg_dots_cd.append(T_bg)
+                bg_turn_to_x[T_bg] = x_dot
 
         if bg_dots_x:
             bg_color_dot = '#2196F3' if bg_spk == 'supporter' else '#4CAF50'
@@ -625,7 +635,10 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         for m in markers:
             if m['speaker'] not in mf: continue
             mt = m['turn']; ms = m['speaker']; ml = m.get('label', '')
-            if is_sent and word_starts is not None:
+            if ms == bg_spk and mt in bg_turn_to_x:
+                # 背景说话者：直接对齐到 bg 点的 x 位置
+                mid_x = bg_turn_to_x[mt]
+            elif is_sent and word_starts is not None:
                 # 句粒度：用对应句的词中点定位
                 sent_pos = [i for i, r in enumerate(results) if r.get('turn_info') and r['turn_info']['turn_index'] == mt]
                 if not sent_pos:
