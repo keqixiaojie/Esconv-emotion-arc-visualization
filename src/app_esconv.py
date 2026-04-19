@@ -419,23 +419,26 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                     val = float(np.mean([r[dim] for r in wr])) if wr else 0.0
                 bg_ctx_scores.append(val)
                 bg_ctx_cd.append(bg_utts_ctx[i]['turn_index'])
-            # 建立主说话者 turn_index → x 的映射
-            if is_sent:
-                ctx_turn_x = {utterances[i]['turn_index']: word_starts_ctx[i]
-                              for i in range(len(utterances))}
-            else:
-                ctx_turn_x = {utterances[i]['turn_index']: i for i in range(len(utterances))}
-            ctx_turn_keys = sorted(ctx_turn_x.keys())
-            bg_ctx_x, bg_ctx_y, bg_ctx_text = [], [], []
-            for val, T in zip(bg_ctx_scores, bg_ctx_cd):
-                if not ctx_turn_keys: continue
-                lo = max((k for k in ctx_turn_keys if k <= T), default=ctx_turn_keys[0])
-                hi = min((k for k in ctx_turn_keys if k >= T), default=ctx_turn_keys[-1])
-                x_pos = ctx_turn_x[lo] if lo == hi else (
-                    ctx_turn_x[lo] + (T - lo) / (hi - lo) * (ctx_turn_x[hi] - ctx_turn_x[lo]))
-                bg_ctx_x.append(x_pos)
-                bg_ctx_y.append(val)
-                bg_ctx_text.append(f"T[{T}] {bg_spk_ctx} {dim[0].upper()}={val:.3f}")
+
+            # 按"紧随其后的主句"分组，聚集在该主句 x 起点
+            main_turn_indices_ctx = [u['turn_index'] for u in utterances]
+            from collections import defaultdict as _dd3
+            bg_ctx_groups = _dd3(list)
+            for val, T_bg in zip(bg_ctx_scores, bg_ctx_cd):
+                next_idx = next((i for i, T in enumerate(main_turn_indices_ctx) if T > T_bg),
+                                len(main_turn_indices_ctx) - 1)
+                bg_ctx_groups[next_idx].append((val, T_bg))
+
+            bg_ctx_x, bg_ctx_y, bg_ctx_text, bg_ctx_cd = [], [], [], []
+            for main_idx in sorted(bg_ctx_groups.keys()):
+                if main_idx >= len(utterances): continue
+                x_base = float(word_starts_ctx[main_idx]) if is_sent else float(main_idx)
+                for k, (val, T_bg) in enumerate(bg_ctx_groups[main_idx]):
+                    bg_ctx_x.append(x_base + k)
+                    bg_ctx_y.append(val)
+                    bg_ctx_text.append(f"T[{T_bg}] {bg_spk_ctx} {dim[0].upper()}={val:.3f}")
+                    bg_ctx_cd.append(T_bg)
+
             if bg_ctx_x:
                 bg_color_ctx_dot = '#2196F3' if bg_spk_ctx == 'supporter' else '#4CAF50'
                 fig.add_trace(go.Scatter(
@@ -443,7 +446,8 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                     name=bg_spk_ctx.capitalize(),
                     marker=dict(size=7, color=bg_color_ctx_dot, opacity=0.6,
                                 symbol='circle', line=dict(width=1, color='white')),
-                    text=bg_ctx_text, hoverinfo='text'))
+                    text=bg_ctx_text, hoverinfo='text',
+                    customdata=bg_ctx_cd))
 
         fig.add_trace(go.Scatter(
             x=xd_utt, y=utt_scores.tolist(), mode='markers+lines', name=discrete_name,
@@ -556,7 +560,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     bg_results_c = cache.get('bg_results', [])
     bg_utts_c = cache.get('bg_utterances', [])
     if bg_spk and bg_results_c and bg_utts_c and len(bg_utts_c) >= ws:
-        # bg 话语序列逐句 VAD，与主图同样方式平滑
+        # bg 话语序列平滑（与主图同样方式）
         if is_sent:
             bg_utt_scores = np.array([r[dim] for r in bg_results_c])
         else:
@@ -569,29 +573,33 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                 float(np.mean(_bg_grp[u['turn_index']])) if _bg_grp[u['turn_index']] else 0.0
                 for u in bg_utts_c])
         bg_smooth_v = smooth_scores(bg_utt_scores, ws)
-        # 建立主说话者 turn_index → x 位置的映射
-        if is_sent:
-            main_turn_x = {results[i]['turn_info']['turn_index']: word_starts[i]
-                           for i in range(len(results)) if results[i].get('turn_info')}
-        else:
-            main_turn_x = {}
-            for i, r in enumerate(results):
-                ti = r.get('turn_info')
-                if ti and ti['turn_index'] not in main_turn_x:
-                    main_turn_x[ti['turn_index']] = i
-        turn_keys = sorted(main_turn_x.keys())
-        bg_dots_x, bg_dots_y, bg_dots_text = [], [], []
+
+        # 按"紧随其后的主句"分组，聚集在该主句 x 起点
+        main_turn_indices = [u['turn_index'] for u in utterances]
+        from collections import defaultdict as _dd2
+        bg_groups = _dd2(list)
         for j, bg_val in enumerate(bg_smooth_v):
-            u = bg_utts_c[j + ws - 1]
-            T = u['turn_index']
-            if not turn_keys: continue
-            lo = max((k for k in turn_keys if k <= T), default=turn_keys[0])
-            hi = min((k for k in turn_keys if k >= T), default=turn_keys[-1])
-            x_pos = main_turn_x[lo] if lo == hi else (
-                main_turn_x[lo] + (T - lo) / (hi - lo) * (main_turn_x[hi] - main_turn_x[lo]))
-            bg_dots_x.append(x_pos)
-            bg_dots_y.append(float(bg_val))
-            bg_dots_text.append(f"T[{T}] {bg_spk} {dim[0].upper()}={bg_val:.3f}")
+            T_bg = bg_utts_c[j + ws - 1]['turn_index']
+            next_idx = next((i for i, T in enumerate(main_turn_indices) if T > T_bg),
+                            len(main_turn_indices) - 1)
+            bg_groups[next_idx].append((float(bg_val), T_bg))
+
+        bg_dots_x, bg_dots_y, bg_dots_text, bg_dots_cd = [], [], [], []
+        for main_idx in sorted(bg_groups.keys()):
+            if main_idx >= len(utterances): continue
+            if is_sent:
+                x_base = float(word_starts[main_idx])
+            else:
+                T_main = utterances[main_idx]['turn_index']
+                x_base = next((float(i) for i, r in enumerate(results)
+                               if r.get('turn_info') and r['turn_info']['turn_index'] == T_main), None)
+                if x_base is None: continue
+            for k, (bg_val, T_bg) in enumerate(bg_groups[main_idx]):
+                bg_dots_x.append(x_base + k)
+                bg_dots_y.append(bg_val)
+                bg_dots_text.append(f"T[{T_bg}] {bg_spk} {dim[0].upper()}={bg_val:.3f}")
+                bg_dots_cd.append(T_bg)
+
         if bg_dots_x:
             bg_color_dot = '#2196F3' if bg_spk == 'supporter' else '#4CAF50'
             fig.add_trace(go.Scatter(
@@ -599,7 +607,8 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                 name=bg_spk.capitalize(),
                 marker=dict(size=7, color=bg_color_dot, opacity=0.6,
                             symbol='circle', line=dict(width=1, color='white')),
-                text=bg_dots_text, hoverinfo='text'))
+                text=bg_dots_text, hoverinfo='text',
+                customdata=bg_dots_cd))
 
     fig.add_trace(go.Scatter(x=xd, y=scores.tolist(), mode='markers+lines', name=discrete_name,
         line=dict(dash='dot', color='rgba(150,150,150,0.5)'), marker=dict(size=6, color='gray'),
