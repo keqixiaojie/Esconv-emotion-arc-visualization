@@ -774,15 +774,35 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
 
     # ---- 差值计算 ----
     seeker_turns = [u['turn_index'] for u in utterances]
+    seeker_turn_set = set(seeker_turns)
 
     def block_vad(block):
         if not block: return None
         vr = vad_extractor.extract(' '.join(u['content'] for u in block))
         return float(np.mean([r[dim] for r in vr])) if vr else None
 
+    # 将 supporter 话语按"中间是否有 seeker 插话"切成连续块
+    supp_blocks = []
+    if bg_utterances:
+        cur = [bg_utterances[0]]
+        for u in bg_utterances[1:]:
+            if any(cur[-1]['turn_index'] < st < u['turn_index'] for st in seeker_turn_set):
+                supp_blocks.append(cur); cur = [u]
+            else:
+                cur.append(u)
+        supp_blocks.append(cur)
+
+    def nearest_prev_block(T):
+        cands = [b for b in supp_blocks if b[-1]['turn_index'] < T]
+        return max(cands, key=lambda b: b[-1]['turn_index']) if cands else None
+
+    def nearest_next_block(T):
+        cands = [b for b in supp_blocks if b[0]['turn_index'] > T]
+        return min(cands, key=lambda b: b[0]['turn_index']) if cands else None
+
     dp_x, dp_y, dp_hover = [], [], []
     dn_x, dn_y, dn_hover = [], [], []
-    bg_x, bg_y = [], []          # seeker 原始弧线（背景）
+    bg_x, bg_y = [], []
     from collections import defaultdict as _ddb
     sp_dots = _ddb(lambda: {'x': [], 'y': []})
     sn_dots = _ddb(lambda: {'x': [], 'y': []})
@@ -791,10 +811,8 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         i = j + valid_start
         if i >= len(utterances): continue
         T = seeker_turns[i]
-        T_p = seeker_turns[i - 1] if i > 0 else -1
-        T_n = seeker_turns[i + 1] if i < len(seeker_turns) - 1 else float('inf')
-        prev_blk = [u for u in bg_utterances if T_p < u['turn_index'] < T]
-        next_blk = [u for u in bg_utterances if T < u['turn_index'] < T_n]
+        prev_blk = nearest_prev_block(T)
+        next_blk = nearest_next_block(T)
         xm = xmid(i)
         bg_x.append(xbg(i)); bg_y.append(float(sv))
 
