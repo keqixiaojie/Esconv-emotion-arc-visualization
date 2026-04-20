@@ -525,9 +525,10 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         fig = go.Figure(); fig.update_layout(title=f"{unit_label}数({len(scores)})<窗口({ws})"); return fig, f"{unit_label}数不足"
     smooth = smooth_scores(scores, ws)
 
+    utterances = cache.get('utterances', [])
     if is_sent:
         # 句粒度对齐词粒度 x 轴：计算每句话的词位置区间
-        utterances_c = cache.get('utterances', [])
+        utterances_c = utterances
         word_counts = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances_c]
         word_starts = []
         cum = 0
