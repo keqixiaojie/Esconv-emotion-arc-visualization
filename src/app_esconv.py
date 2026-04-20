@@ -151,6 +151,16 @@ app.layout = html.Div([
     dcc.Loading(type='dot', color='#888', children=[
         html.Div(id='status-info', style={'padding': '4px 12px', 'color': '#666', 'fontSize': '12px'})
     ]),
+    html.Div([
+        html.Div("📐 差值分析：Seeker 受引导（前）vs Supporter 附和（后）",
+                 style={'fontSize': '13px', 'fontWeight': 'bold', 'padding': '8px 12px 4px',
+                        'color': '#555'}),
+        dcc.Loading(type='circle', color='#666', children=[
+            dcc.Graph(id='graph-diff-valence'),
+            dcc.Graph(id='graph-diff-arousal'),
+            dcc.Graph(id='graph-diff-dominance'),
+        ])
+    ], style={'marginTop': '8px', 'borderTop': '1px solid #ddd', 'paddingTop': '4px'}),
     # 标签编辑弹窗
     dcc.Store(id='editing-turn', data=None),
     html.Div(id='label-modal-container', children=[
@@ -697,6 +707,159 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     shown = len([m for m in (markers or []) if m['speaker'] in mf])
     return fig, f"✅ {len(results)}{unit_label} | W={ws} | 弧线{len(smooth)} | 拐点{shown}/{len(markers or [])} | {gran_tag}"
+
+
+def _build_diff_figure(dim, ws, smooth_mode, cache):
+    empty = go.Figure()
+    empty.update_layout(title="需要选择单独说话者（Seeker 或 Supporter）",
+                        height=220, margin=dict(l=40, r=20, t=35, b=25))
+    if not cache or not cache.get('results') or not cache.get('bg_utterances'):
+        return empty
+
+    results = cache['results']
+    utterances = cache.get('utterances', [])
+    bg_utterances = cache.get('bg_utterances', [])
+    gran = cache.get('granularity', 'word')
+    is_sent = (gran == 'sentence')
+    if not utterances or not bg_utterances:
+        return empty
+
+    # ---- seeker 每句平滑 VAD（与主图对齐）----
+    scores = np.array([r[dim] for r in results])
+    if smooth_mode == 'context' and is_sent and sent_predictor is not None:
+        seeker_smooth_list = []
+        for i in range(ws - 1, len(utterances)):
+            combined = ' '.join(u['content'] for u in utterances[i - ws + 1: i + 1])
+            preds = sent_predictor._predict_batch([combined])
+            dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
+            seeker_smooth_list.append((float(preds[0][dim_idx]) - 3.0) / 2.0)
+        seeker_smooth = np.array(seeker_smooth_list)
+    else:
+        if is_sent:
+            utt_scores = scores
+        else:
+            from collections import defaultdict as _dda
+            grp = _dda(list)
+            for r in results:
+                ti = r.get('turn_info')
+                if ti: grp[ti['turn_index']].append(r[dim])
+            utt_scores = np.array([
+                float(np.mean(grp[u['turn_index']])) if grp[u['turn_index']] else 0.0
+                for u in utterances])
+        if len(utt_scores) < ws:
+            return empty
+        seeker_smooth = smooth_scores(utt_scores, ws)
+    valid_start = ws - 1
+
+    # ---- x 坐标（与主图对齐）----
+    if is_sent:
+        wcs = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances]
+        ws_arr, cum = [], 0
+        for c in wcs:
+            ws_arr.append(cum); cum += c
+        def xst(i): return float(ws_arr[i])
+        def xen(i): return float(ws_arr[i] + wcs[i] - 1)
+    else:
+        twr = {}
+        for idx, r in enumerate(results):
+            ti = r.get('turn_info')
+            if ti:
+                T = ti['turn_index']
+                twr[T] = (twr[T][0] if T in twr else idx, idx)
+        def xst(i):
+            T = utterances[i]['turn_index']
+            return float(twr.get(T, (i, i))[0])
+        def xen(i):
+            T = utterances[i]['turn_index']
+            return float(twr.get(T, (i, i))[1])
+
+    # ---- 差值计算 ----
+    seeker_turns = [u['turn_index'] for u in utterances]
+
+    def block_vad(block):
+        if not block: return None
+        vr = vad_extractor.extract(' '.join(u['content'] for u in block))
+        return float(np.mean([r[dim] for r in vr])) if vr else None
+
+    dp_x, dp_y, dp_hover = [], [], []
+    dn_x, dn_y, dn_hover = [], [], []
+    from collections import defaultdict as _ddb
+    sp_dots = _ddb(lambda: {'x': [], 'y': []})
+    sn_dots = _ddb(lambda: {'x': [], 'y': []})
+
+    for j, sv in enumerate(seeker_smooth):
+        i = j + valid_start
+        if i >= len(utterances): continue
+        T = seeker_turns[i]
+        T_p = seeker_turns[i - 1] if i > 0 else -1
+        T_n = seeker_turns[i + 1] if i < len(seeker_turns) - 1 else float('inf')
+        prev_blk = [u for u in bg_utterances if T_p < u['turn_index'] < T]
+        next_blk = [u for u in bg_utterances if T < u['turn_index'] < T_n]
+        xs, xe = xst(i), xen(i)
+
+        pv = block_vad(prev_blk)
+        if pv is not None:
+            d = float(sv) - pv
+            dp_x.append(xs); dp_y.append(d)
+            strats = [u.get('strategy') or 'Others' for u in prev_blk]
+            dp_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
+            for k, s in enumerate(dict.fromkeys(strats)):  # 去重保序
+                sp_dots[s]['x'].append(xs - (k + 1) * 1.0)
+                sp_dots[s]['y'].append(d)
+
+        nv = block_vad(next_blk)
+        if nv is not None:
+            d = float(sv) - nv
+            dn_x.append(xe); dn_y.append(d)
+            strats = [u.get('strategy') or 'Others' for u in next_blk]
+            dn_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
+            for k, s in enumerate(dict.fromkeys(strats)):
+                sn_dots[s]['x'].append(xe + (k + 1) * 1.0)
+                sn_dots[s]['y'].append(d)
+
+    # ---- 画图 ----
+    fig = go.Figure()
+    fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
+    if dp_x:
+        fig.add_trace(go.Scatter(x=dp_x, y=dp_y, mode='lines+markers',
+            name='seeker − prev_supp（被引导）',
+            line=dict(color='#FF7043', width=2), marker=dict(size=5),
+            text=dp_hover, hoverinfo='text'))
+    if dn_x:
+        fig.add_trace(go.Scatter(x=dn_x, y=dn_y, mode='lines+markers',
+            name='seeker − next_supp（附和）',
+            line=dict(color='#42A5F5', width=2), marker=dict(size=5),
+            text=dn_hover, hoverinfo='text'))
+    for s, d in sp_dots.items():
+        fig.add_trace(go.Scatter(x=d['x'], y=d['y'], mode='markers', name=s,
+            marker=dict(size=9, color=STRATEGY_COLORS.get(s, '#BDBDBD'),
+                        symbol='triangle-left', opacity=0.85),
+            hovertext=s, hoverinfo='text', showlegend=False))
+    for s, d in sn_dots.items():
+        fig.add_trace(go.Scatter(x=d['x'], y=d['y'], mode='markers', name=s,
+            marker=dict(size=9, color=STRATEGY_COLORS.get(s, '#BDBDBD'),
+                        symbol='triangle-right', opacity=0.85),
+            hovertext=s, hoverinfo='text', showlegend=False))
+    fig.update_layout(
+        title=f"#{cache.get('conv_id','?')} | {dim.capitalize()} 差值分析",
+        xaxis_title="情感词索引", yaxis_title=f"Δ{dim.capitalize()}",
+        yaxis=dict(range=[-2, 2]),
+        hovermode="closest", height=240, margin=dict(l=40, r=20, t=35, b=25),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    return fig
+
+
+@app.callback(
+    Output('graph-diff-valence', 'figure'),
+    Output('graph-diff-arousal', 'figure'),
+    Output('graph-diff-dominance', 'figure'),
+    Input('window-slider', 'value'),
+    Input('smooth-mode-radio', 'value'),
+    Input('vad-cache-store', 'data'))
+def update_diff_graphs(ws, smooth_mode, cache):
+    figs = [_build_diff_figure(dim, ws, smooth_mode, cache)
+            for dim in ['valence', 'arousal', 'dominance']]
+    return figs[0], figs[1], figs[2]
 
 
 @app.callback(
