@@ -820,9 +820,10 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
     clr = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
     fig = go.Figure()
     # seeker 原始弧线（背景，浅色，双轴右侧）
+    bg_shape = 'hv' if is_sent else 'linear'
     if bg_x:
         fig.add_trace(go.Scatter(x=bg_x, y=bg_y, mode='lines', name=f'{dim.capitalize()} (seeker)',
-            line=dict(color=clr.get(dim, 'gray'), width=1.5, dash='dot'),
+            line=dict(color=clr.get(dim, 'gray'), width=1.5, dash='dot', shape=bg_shape),
             opacity=0.3, yaxis='y2', hoverinfo='skip'))
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
     if dp_x:
