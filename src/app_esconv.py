@@ -869,7 +869,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
     fig.update_layout(
         title=f"#{cache.get('conv_id','?')} | {dim.capitalize()} 差值分析",
         xaxis_title="情感词索引", yaxis_title=f"Δ{dim.capitalize()}",
-        yaxis=dict(range=[-2, 2]),
+        yaxis=dict(range=[-1, 1]),
         yaxis2=dict(range=[-1, 1], overlaying='y', side='right',
                     showgrid=False, zeroline=False, showticklabels=False),
         hovermode="closest", height=240, margin=dict(l=40, r=20, t=35, b=25),
