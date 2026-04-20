@@ -30,6 +30,17 @@ except Exception as e:
 
 MARKER_COLORS = {'seeker': '#4CAF50', 'supporter': '#2196F3'}
 MARKER_ICONS = {'seeker': '🟢', 'supporter': '🔵'}
+# 跟随型冷色系，引导型暖色系，Others灰
+STRATEGY_COLORS = {
+    'Question':                    '#42A5F5',  # 蓝
+    'Reflection of feelings':      '#7E57C2',  # 紫
+    'Restatement or Paraphrasing': '#26C6DA',  # 青
+    'Self-disclosure':             '#5C6BC0',  # 靛蓝
+    'Affirmation and Reassurance': '#66BB6A',  # 绿
+    'Providing Suggestions':       '#FFA726',  # 橙
+    'Information':                 '#FF7043',  # 深橙
+    'Others':                      '#BDBDBD',  # 灰
+}
 
 # 存储格式: { "conv_0": [{"turn":3,"speaker":"seeker","label":"..."}, ...] }
 def _ck(cid): return f"conv_{cid}"
@@ -425,32 +436,34 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
             main_turn_indices_ctx = [u['turn_index'] for u in utterances]
             from collections import defaultdict as _dd3
             bg_ctx_groups = _dd3(list)
-            for val, T_bg in zip(bg_ctx_scores, bg_ctx_cd):
+            for i_bg, (val, T_bg) in enumerate(zip(bg_ctx_scores, bg_ctx_cd)):
+                strat_ctx = (bg_utts_ctx[i_bg + ws - 1].get('strategy') or 'Others')
                 next_idx = next((i for i, T in enumerate(main_turn_indices_ctx) if T > T_bg),
                                 len(main_turn_indices_ctx) - 1)
-                bg_ctx_groups[next_idx].append((val, T_bg))
+                bg_ctx_groups[next_idx].append((val, T_bg, strat_ctx))
 
-            bg_ctx_x, bg_ctx_y, bg_ctx_text, bg_ctx_cd = [], [], [], []
+            from collections import defaultdict as _dd4
+            strat_ctx_dots = _dd4(lambda: {'x': [], 'y': [], 'text': [], 'cd': []})
             for main_idx in sorted(bg_ctx_groups.keys()):
                 if main_idx >= len(utterances): continue
                 x_base = float(word_starts_ctx[main_idx]) if is_sent else float(main_idx)
-                for k, (val, T_bg) in enumerate(bg_ctx_groups[main_idx]):
+                for k, (val, T_bg, strat_ctx) in enumerate(bg_ctx_groups[main_idx]):
                     x_dot = x_base + k
-                    bg_ctx_x.append(x_dot)
-                    bg_ctx_y.append(val)
-                    bg_ctx_text.append(f"T[{T_bg}] {bg_spk_ctx} {dim[0].upper()}={val:.3f}")
-                    bg_ctx_cd.append(T_bg)
+                    strat_ctx_dots[strat_ctx]['x'].append(x_dot)
+                    strat_ctx_dots[strat_ctx]['y'].append(val)
+                    strat_ctx_dots[strat_ctx]['text'].append(f"T[{T_bg}] [{strat_ctx}] {dim[0].upper()}={val:.3f}")
+                    strat_ctx_dots[strat_ctx]['cd'].append(T_bg)
                     bg_ctx_turn_to_x[T_bg] = x_dot
 
-            if bg_ctx_x:
-                bg_color_ctx_dot = '#2196F3' if bg_spk_ctx == 'supporter' else '#4CAF50'
+            for strat_ctx, dots in strat_ctx_dots.items():
+                sc = STRATEGY_COLORS.get(strat_ctx, '#BDBDBD')
                 fig.add_trace(go.Scatter(
-                    x=bg_ctx_x, y=bg_ctx_y, mode='markers',
-                    name=bg_spk_ctx.capitalize(),
-                    marker=dict(size=7, color=bg_color_ctx_dot, opacity=0.6,
+                    x=dots['x'], y=dots['y'], mode='markers',
+                    name=strat_ctx,
+                    marker=dict(size=7, color=sc, opacity=0.75,
                                 symbol='circle', line=dict(width=1, color='white')),
-                    text=bg_ctx_text, hoverinfo='text',
-                    customdata=bg_ctx_cd))
+                    text=dots['text'], hoverinfo='text',
+                    customdata=dots['cd']))
 
         fig.add_trace(go.Scatter(
             x=xd_utt, y=utt_scores.tolist(), mode='markers+lines', name=discrete_name,
@@ -586,13 +599,15 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
         from collections import defaultdict as _dd2
         bg_groups = _dd2(list)
         for j, bg_val in enumerate(bg_smooth_v):
-            T_bg = bg_utts_c[j + ws - 1]['turn_index']
+            u_bg = bg_utts_c[j + ws - 1]
+            T_bg = u_bg['turn_index']
+            strat = u_bg.get('strategy') or 'Others'
             next_idx = next((i for i, T in enumerate(main_turn_indices) if T > T_bg),
                             len(main_turn_indices) - 1)
-            bg_groups[next_idx].append((float(bg_val), T_bg))
+            bg_groups[next_idx].append((float(bg_val), T_bg, strat))
 
-        bg_dots_x, bg_dots_y, bg_dots_text, bg_dots_cd = [], [], [], []
-        bg_turn_to_x = {}
+        from collections import defaultdict as _dd3
+        strat_dots = _dd3(lambda: {'x': [], 'y': [], 'text': [], 'cd': []})
         for main_idx in sorted(bg_groups.keys()):
             if main_idx >= len(utterances): continue
             if is_sent:
@@ -602,23 +617,23 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                 x_base = next((float(i) for i, r in enumerate(results)
                                if r.get('turn_info') and r['turn_info']['turn_index'] == T_main), None)
                 if x_base is None: continue
-            for k, (bg_val, T_bg) in enumerate(bg_groups[main_idx]):
+            for k, (bg_val, T_bg, strat) in enumerate(bg_groups[main_idx]):
                 x_dot = x_base + k
-                bg_dots_x.append(x_dot)
-                bg_dots_y.append(bg_val)
-                bg_dots_text.append(f"T[{T_bg}] {bg_spk} {dim[0].upper()}={bg_val:.3f}")
-                bg_dots_cd.append(T_bg)
+                strat_dots[strat]['x'].append(x_dot)
+                strat_dots[strat]['y'].append(bg_val)
+                strat_dots[strat]['text'].append(f"T[{T_bg}] [{strat}] {dim[0].upper()}={bg_val:.3f}")
+                strat_dots[strat]['cd'].append(T_bg)
                 bg_turn_to_x[T_bg] = x_dot
 
-        if bg_dots_x:
-            bg_color_dot = '#2196F3' if bg_spk == 'supporter' else '#4CAF50'
+        for strat, dots in strat_dots.items():
+            sc = STRATEGY_COLORS.get(strat, '#BDBDBD')
             fig.add_trace(go.Scatter(
-                x=bg_dots_x, y=bg_dots_y, mode='markers',
-                name=bg_spk.capitalize(),
-                marker=dict(size=7, color=bg_color_dot, opacity=0.6,
+                x=dots['x'], y=dots['y'], mode='markers',
+                name=strat,
+                marker=dict(size=7, color=sc, opacity=0.75,
                             symbol='circle', line=dict(width=1, color='white')),
-                text=bg_dots_text, hoverinfo='text',
-                customdata=bg_dots_cd))
+                text=dots['text'], hoverinfo='text',
+                customdata=dots['cd']))
 
     fig.add_trace(go.Scatter(x=xd, y=scores.tolist(), mode='markers+lines', name=discrete_name,
         line=dict(dash='dot', color='rgba(150,150,150,0.5)'), marker=dict(size=6, color='gray'),
