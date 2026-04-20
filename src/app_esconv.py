@@ -758,6 +758,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         for c in wcs:
             ws_arr.append(cum); cum += c
         def xmid(i): return float(ws_arr[i] + (wcs[i] - 1) / 2)
+        def xbg(i):  return float(ws_arr[i])   # 阶梯线从句子起点开始
     else:
         twr = {}
         for idx, r in enumerate(results):
@@ -769,6 +770,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
             T = utterances[i]['turn_index']
             lo, hi = twr.get(T, (i, i))
             return float((lo + hi) / 2)
+        def xbg(i): return xmid(i)   # 词粒度无阶梯，中点即可
 
     # ---- 差值计算 ----
     seeker_turns = [u['turn_index'] for u in utterances]
@@ -794,7 +796,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         prev_blk = [u for u in bg_utterances if T_p < u['turn_index'] < T]
         next_blk = [u for u in bg_utterances if T < u['turn_index'] < T_n]
         xm = xmid(i)
-        bg_x.append(xm); bg_y.append(float(sv))
+        bg_x.append(xbg(i)); bg_y.append(float(sv))
 
         pv = block_vad(prev_blk)
         if pv is not None:
