@@ -152,7 +152,7 @@ app.layout = html.Div([
         html.Div(id='status-info', style={'padding': '4px 12px', 'color': '#666', 'fontSize': '12px'})
     ]),
     html.Div([
-        html.Div("📐 差值分析：Seeker 受引导（前）vs Supporter 附和（后）",
+        html.Div("📐 差值分析：Seeker 受引导（前）vs Seeker 被附和（后）",
                  style={'fontSize': '13px', 'fontWeight': 'bold', 'padding': '8px 12px 4px',
                         'color': '#555'}),
         dcc.Loading(type='circle', color='#666', children=[
