@@ -757,8 +757,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         ws_arr, cum = [], 0
         for c in wcs:
             ws_arr.append(cum); cum += c
-        def xst(i): return float(ws_arr[i])
-        def xen(i): return float(ws_arr[i] + wcs[i] - 1)
+        def xmid(i): return float(ws_arr[i] + (wcs[i] - 1) / 2)
     else:
         twr = {}
         for idx, r in enumerate(results):
@@ -766,12 +765,10 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
             if ti:
                 T = ti['turn_index']
                 twr[T] = (twr[T][0] if T in twr else idx, idx)
-        def xst(i):
+        def xmid(i):
             T = utterances[i]['turn_index']
-            return float(twr.get(T, (i, i))[0])
-        def xen(i):
-            T = utterances[i]['turn_index']
-            return float(twr.get(T, (i, i))[1])
+            lo, hi = twr.get(T, (i, i))
+            return float((lo + hi) / 2)
 
     # ---- 差值计算 ----
     seeker_turns = [u['turn_index'] for u in utterances]
@@ -783,6 +780,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
 
     dp_x, dp_y, dp_hover = [], [], []
     dn_x, dn_y, dn_hover = [], [], []
+    bg_x, bg_y = [], []          # seeker 原始弧线（背景）
     from collections import defaultdict as _ddb
     sp_dots = _ddb(lambda: {'x': [], 'y': []})
     sn_dots = _ddb(lambda: {'x': [], 'y': []})
@@ -795,30 +793,37 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         T_n = seeker_turns[i + 1] if i < len(seeker_turns) - 1 else float('inf')
         prev_blk = [u for u in bg_utterances if T_p < u['turn_index'] < T]
         next_blk = [u for u in bg_utterances if T < u['turn_index'] < T_n]
-        xs, xe = xst(i), xen(i)
+        xm = xmid(i)
+        bg_x.append(xm); bg_y.append(float(sv))
 
         pv = block_vad(prev_blk)
         if pv is not None:
             d = float(sv) - pv
-            dp_x.append(xs); dp_y.append(d)
+            dp_x.append(xm); dp_y.append(d)
             strats = [u.get('strategy') or 'Others' for u in prev_blk]
             dp_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
-            for k, s in enumerate(dict.fromkeys(strats)):  # 去重保序
-                sp_dots[s]['x'].append(xs - (k + 1) * 1.0)
+            for k, s in enumerate(dict.fromkeys(strats)):
+                sp_dots[s]['x'].append(xm - (k + 1) * 1.0)
                 sp_dots[s]['y'].append(d)
 
         nv = block_vad(next_blk)
         if nv is not None:
             d = float(sv) - nv
-            dn_x.append(xe); dn_y.append(d)
+            dn_x.append(xm); dn_y.append(d)
             strats = [u.get('strategy') or 'Others' for u in next_blk]
             dn_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
             for k, s in enumerate(dict.fromkeys(strats)):
-                sn_dots[s]['x'].append(xe + (k + 1) * 1.0)
+                sn_dots[s]['x'].append(xm + (k + 1) * 1.0)
                 sn_dots[s]['y'].append(d)
 
     # ---- 画图 ----
+    clr = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
     fig = go.Figure()
+    # seeker 原始弧线（背景，浅色，双轴右侧）
+    if bg_x:
+        fig.add_trace(go.Scatter(x=bg_x, y=bg_y, mode='lines', name=f'{dim.capitalize()} (seeker)',
+            line=dict(color=clr.get(dim, 'gray'), width=1.5, dash='dot'),
+            opacity=0.3, yaxis='y2', hoverinfo='skip'))
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
     if dp_x:
         fig.add_trace(go.Scatter(x=dp_x, y=dp_y, mode='lines+markers',
@@ -844,6 +849,8 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
         title=f"#{cache.get('conv_id','?')} | {dim.capitalize()} 差值分析",
         xaxis_title="情感词索引", yaxis_title=f"Δ{dim.capitalize()}",
         yaxis=dict(range=[-2, 2]),
+        yaxis2=dict(range=[-1, 1], overlaying='y', side='right',
+                    showgrid=False, zeroline=False, showticklabels=False),
         hovermode="closest", height=240, margin=dict(l=40, r=20, t=35, b=25),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     return fig
