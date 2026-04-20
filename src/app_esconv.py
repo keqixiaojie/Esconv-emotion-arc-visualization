@@ -778,7 +778,12 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
 
     def block_vad(block):
         if not block: return None
-        vr = vad_extractor.extract(' '.join(u['content'] for u in block))
+        combined = ' '.join(u['content'] for u in block)
+        if is_sent and sent_predictor is not None:
+            preds = sent_predictor._predict_batch([combined])
+            dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
+            return (float(preds[0][dim_idx]) - 3.0) / 2.0
+        vr = vad_extractor.extract(combined)
         return float(np.mean([r[dim] for r in vr])) if vr else None
 
     # 将 supporter 话语按"中间是否有 seeker 插话"切成连续块
