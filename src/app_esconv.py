@@ -460,8 +460,8 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
                 fig.add_trace(go.Scatter(
                     x=dots['x'], y=dots['y'], mode='markers',
                     name=strat_ctx,
-                    marker=dict(size=7, color=sc, opacity=0.75,
-                                symbol='circle', line=dict(width=1, color='white')),
+                    marker=dict(size=10, color=sc, opacity=0.75,
+                                symbol='circle', line=dict(width=1.5, color='white')),
                     text=dots['text'], hoverinfo='text',
                     customdata=dots['cd']))
 
@@ -630,7 +630,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
             fig.add_trace(go.Scatter(
                 x=dots['x'], y=dots['y'], mode='markers',
                 name=strat,
-                marker=dict(size=7, color=sc, opacity=0.75,
+                marker=dict(size=10, color=sc, opacity=0.75,
                             symbol='circle', line=dict(width=1, color='white')),
                 text=dots['text'], hoverinfo='text',
                 customdata=dots['cd']))
