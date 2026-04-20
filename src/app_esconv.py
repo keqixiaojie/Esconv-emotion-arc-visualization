@@ -821,15 +821,21 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
         xm = xmid(i)
         bg_x.append(xbg(i)); bg_y.append(float(sv))
 
+        T_p = seeker_turns[i - 1] if i > 0 else -1
+        T_n = seeker_turns[i + 1] if i < len(seeker_turns) - 1 else float('inf')
+        prev_immediate = prev_blk is not None and all(T_p < u['turn_index'] < T for u in prev_blk)
+        next_immediate = next_blk is not None and all(T < u['turn_index'] < T_n for u in next_blk)
+
         pv = block_vad(prev_blk)
         if pv is not None:
             d = float(sv) - pv
             dp_x.append(xm); dp_y.append(d)
             strats = [u.get('strategy') or 'Others' for u in prev_blk]
             dp_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
-            for k, s in enumerate(dict.fromkeys(strats)):
-                sp_dots[s]['x'].append(xm - (k + 1) * 1.0)
-                sp_dots[s]['y'].append(d)
+            if prev_immediate:
+                for k, s in enumerate(dict.fromkeys(strats)):
+                    sp_dots[s]['x'].append(xm - (k + 1) * 1.0)
+                    sp_dots[s]['y'].append(d)
 
         nv = block_vad(next_blk)
         if nv is not None:
@@ -837,9 +843,10 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
             dn_x.append(xm); dn_y.append(d)
             strats = [u.get('strategy') or 'Others' for u in next_blk]
             dn_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
-            for k, s in enumerate(dict.fromkeys(strats)):
-                sn_dots[s]['x'].append(xm + (k + 1) * 1.0)
-                sn_dots[s]['y'].append(d)
+            if next_immediate:
+                for k, s in enumerate(dict.fromkeys(strats)):
+                    sn_dots[s]['x'].append(xm + (k + 1) * 1.0)
+                    sn_dots[s]['y'].append(d)
 
     # ---- 画图 ----
     clr = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
