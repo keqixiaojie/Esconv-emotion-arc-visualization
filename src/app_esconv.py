@@ -709,7 +709,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     return fig, f"✅ {len(results)}{unit_label} | W={ws} | 弧线{len(smooth)} | 拐点{shown}/{len(markers or [])} | {gran_tag}"
 
 
-def _build_diff_figure(dim, ws, smooth_mode, cache):
+def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
     empty = go.Figure()
     empty.update_layout(title="需要选择单独说话者（Seeker 或 Supporter）",
                         height=220, margin=dict(l=40, r=20, t=35, b=25))
@@ -871,6 +871,42 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
             marker=dict(size=9, color=STRATEGY_COLORS.get(s, '#BDBDBD'),
                         symbol='triangle-right', opacity=0.85),
             hovertext=s, hoverinfo='text', showlegend=False))
+    # 拐点标记
+    if markers and mf:
+        # 建立 seeker turn_index → xmid 映射
+        sk_turn_to_x = {utterances[i]['turn_index']: xmid(i) for i in range(len(utterances))}
+        # supporter turn → 在 seeker x 轴上插值
+        sk_turn_keys = sorted(sk_turn_to_x.keys())
+        def supp_x(T):
+            if not sk_turn_keys: return None
+            lo = max((k for k in sk_turn_keys if k <= T), default=sk_turn_keys[0])
+            hi = min((k for k in sk_turn_keys if k >= T), default=sk_turn_keys[-1])
+            if lo == hi: return sk_turn_to_x[lo]
+            return sk_turn_to_x[lo] + (T - lo) / (hi - lo) * (sk_turn_to_x[hi] - sk_turn_to_x[lo])
+
+        mk_x, mk_y, mk_text, mk_color = [], [], [], []
+        for m in markers:
+            if m['speaker'] not in mf: continue
+            mt = m['turn']; ms = m['speaker']; ml = m.get('label', '')
+            mid_x = sk_turn_to_x.get(mt) if ms != cache.get('bg_speaker') else supp_x(mt)
+            if mid_x is None: mid_x = supp_x(mt)
+            if mid_x is None: continue
+            mc = MARKER_COLORS.get(ms, '#9c27b0')
+            fig.add_vline(x=mid_x, line_dash='dash' if ms == 'seeker' else 'dot',
+                          line_color=mc, opacity=0.5, line_width=2)
+            icon = MARKER_ICONS.get(ms, '📌')
+            fig.add_annotation(x=mid_x, y=1.0, text=f"{icon}T{mt}", showarrow=False,
+                               font=dict(size=9, color=mc))
+            mk_x.append(mid_x); mk_y.append(1.0)
+            lbl = f"<b>{icon} 轮次[{mt}] {ms}</b>"
+            if ml: lbl += f"<br>📝 {ml}"
+            mk_text.append(lbl); mk_color.append(mc)
+        if mk_x:
+            fig.add_trace(go.Scatter(x=mk_x, y=mk_y, mode='markers', name='拐点标记',
+                marker=dict(size=10, color=mk_color, symbol='diamond',
+                            line=dict(width=1, color='white')),
+                hovertext=mk_text, hoverinfo='text', showlegend=True))
+
     fig.update_layout(
         title=f"#{cache.get('conv_id','?')} | {dim.capitalize()} 差值分析",
         xaxis_title="情感词索引", yaxis_title=f"Δ{dim.capitalize()}",
@@ -888,9 +924,11 @@ def _build_diff_figure(dim, ws, smooth_mode, cache):
     Output('graph-diff-dominance', 'figure'),
     Input('window-slider', 'value'),
     Input('smooth-mode-radio', 'value'),
-    Input('vad-cache-store', 'data'))
-def update_diff_graphs(ws, smooth_mode, cache):
-    figs = [_build_diff_figure(dim, ws, smooth_mode, cache)
+    Input('vad-cache-store', 'data'),
+    Input('markers-store', 'data'),
+    Input('marker-filter', 'value'))
+def update_diff_graphs(ws, smooth_mode, cache, markers, mf):
+    figs = [_build_diff_figure(dim, ws, smooth_mode, cache, markers, mf)
             for dim in ['valence', 'arousal', 'dominance']]
     return figs[0], figs[1], figs[2]
 
