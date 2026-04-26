@@ -40,7 +40,7 @@ DIFF_RELATION_COLORS = {'prev': '#FF7043', 'next': '#42A5F5'}
 DIM_COLORS = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
 DIM_SHORT = {'valence': 'V', 'arousal': 'A', 'dominance': 'D'}
 RELATION_LABELS = {'prev': '上次supporter', 'next': '下次supporter'}
-TREND_LABELS = {'rise': '上升点', 'fall': '下降点'}
+TREND_LABELS = {'rise': '升段起点', 'fall': '降段起点'}
 SYNC_CONFIDENCE = 0.95
 SYNC_PLOT_MAX_POINTS = 2500
 SYNC_CACHE_VERSION = 2
@@ -395,30 +395,49 @@ def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
     turns = relation_data['turns']
     ys_arr = np.asarray(ys, dtype=float)
     markers = []
-    for trend, matcher in [('rise', lambda cur, prev: cur > prev), ('fall', lambda cur, prev: cur < prev)]:
-        for marker_idx in range(AUTO_TREND_SKIP_POINTS + 1, len(ys_arr)):
-            if not matcher(ys_arr[marker_idx], ys_arr[marker_idx - 1]):
-                continue
-            strategy_summary = (
-                relation_data['strategy_summary'][marker_idx]
-                if marker_idx < len(relation_data['strategy_summary']) else '')
-            default_label = f"{DIM_SHORT[dim]} {TREND_LABELS[trend]}"
-            if strategy_summary:
-                default_label += f" | {RELATION_LABELS[relation]}: {strategy_summary}"
-            marker_id = f"{relation}:{dim}:{trend}:{marker_idx}"
-            label = labels.get(marker_id) or default_label
-            markers.append({
-                'marker_id': marker_id,
-                'relation': relation,
-                'dim': dim,
-                'trend': trend,
-                'x': xs[marker_idx],
-                'y': ys[marker_idx],
-                'turn': turns[marker_idx],
-                'label': label,
-                'default_label': default_label,
-                'slope': float(ys_arr[marker_idx] - ys_arr[marker_idx - 1]),
-            })
+    start_idx = AUTO_TREND_SKIP_POINTS + 1
+    prev_dir = 0
+    for idx in range(1, min(start_idx, len(ys_arr))):
+        diff = ys_arr[idx] - ys_arr[idx - 1]
+        if diff > 0:
+            prev_dir = 1
+        elif diff < 0:
+            prev_dir = -1
+
+    for marker_idx in range(start_idx, len(ys_arr)):
+        diff = ys_arr[marker_idx] - ys_arr[marker_idx - 1]
+        if diff == 0:
+            continue
+        cur_dir = 1 if diff > 0 else -1
+        if prev_dir == 0:
+            prev_dir = cur_dir
+            continue
+        if cur_dir == prev_dir:
+            prev_dir = cur_dir
+            continue
+
+        trend = 'rise' if cur_dir > 0 else 'fall'
+        strategy_summary = (
+            relation_data['strategy_summary'][marker_idx]
+            if marker_idx < len(relation_data['strategy_summary']) else '')
+        default_label = f"{DIM_SHORT[dim]} {TREND_LABELS[trend]}"
+        if strategy_summary:
+            default_label += f" | {RELATION_LABELS[relation]}: {strategy_summary}"
+        marker_id = f"{relation}:{dim}:{trend}:{marker_idx}"
+        label = labels.get(marker_id) or default_label
+        markers.append({
+            'marker_id': marker_id,
+            'relation': relation,
+            'dim': dim,
+            'trend': trend,
+            'x': xs[marker_idx],
+            'y': ys[marker_idx],
+            'turn': turns[marker_idx],
+            'label': label,
+            'default_label': default_label,
+            'slope': float(diff),
+        })
+        prev_dir = cur_dir
     return markers
 
 def _parse_turn_from_customdata(customdata):
