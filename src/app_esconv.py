@@ -34,9 +34,9 @@ except Exception as e:
     print(f"⚠️ 句粒度模型加载失败: {e}，句粒度功能不可用")
     sent_predictor = None
 
-MARKER_COLORS = {'seeker': '#4CAF50', 'supporter': '#2196F3'}
+MARKER_COLORS = {'seeker': '#4CAF50', 'supporter': '#64B5F6'}
 MARKER_ICONS = {'seeker': '🟢', 'supporter': '🔵'}
-DIFF_RELATION_COLORS = {'prev': '#FF7043', 'next': '#42A5F5'}
+DIFF_RELATION_COLORS = {'prev': '#FF7043', 'next': 'rgba(66,165,245,0.55)'}
 DIM_COLORS = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
 DIM_SHORT = {'valence': 'V', 'arousal': 'A', 'dominance': 'D'}
 RELATION_LABELS = {'prev': '上次supporter', 'next': '下次supporter'}
@@ -1435,7 +1435,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
         fig.add_trace(go.Scatter(
             x=next_series['x'], y=next_series['y'], mode='lines+markers',
             name='seeker − next_supp（附和）',
-            line=dict(color=DIFF_RELATION_COLORS['next'], width=2), marker=dict(size=5),
+            line=dict(color=DIFF_RELATION_COLORS['next'], width=2), marker=dict(size=4, color='#64B5F6'),
             text=next_series['hover'], hoverinfo='text', customdata=next_series['turns']))
 
     for strategy, dots in diff_series['strategy_prev'].items():
@@ -1455,13 +1455,19 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
         _build_auto_diff_markers(dim, 'prev', prev_series, cache.get('conv_id')) +
         _build_auto_diff_markers(dim, 'next', next_series, cache.get('conv_id')))
     for marker in auto_markers:
-        trend_text = '首升' if marker['trend'] == 'rise' else '首降'
+        trend_text = '升段' if marker['trend'] == 'rise' else '降段'
         trend_symbol = 'triangle-up' if marker['trend'] == 'rise' else 'triangle-down'
-        marker_color = '#BF360C' if marker['relation'] == 'prev' else '#0D47A1'
+        marker_color = '#BF360C' if marker['relation'] == 'prev' else '#64B5F6'
+        marker_x = marker['x'] if marker['relation'] == 'prev' else marker['x'] + 0.45
+        text_position = (
+            'top center' if marker['relation'] == 'prev' and marker['trend'] == 'rise'
+            else 'bottom center' if marker['relation'] == 'prev'
+            else 'middle right'
+        )
         fig.add_trace(go.Scatter(
-            x=[marker['x']], y=[marker['y']], mode='markers+text',
+            x=[marker_x], y=[marker['y']], mode='markers+text',
             text=[trend_text],
-            textposition='top center' if marker['trend'] == 'rise' else 'bottom center',
+            textposition=text_position,
             textfont=dict(size=11, color=marker_color),
             marker=dict(size=14, color=marker_color, symbol=trend_symbol,
                         line=dict(width=1, color='white')),
@@ -1617,21 +1623,19 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
     actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
     cache_key = _sync_cache_key(tail_ratio, ws, actual_mode, granularity)
 
-    dataset = None
-    if sync_dataset_data and sync_dataset_data.get('available'):
-        dataset = _restore_sync_dataset(sync_dataset_data)
+    dataset = _load_sync_dataset_cached_only(tail_ratio, ws, actual_mode, granularity)
+    if dataset is None and sync_dataset_data and sync_dataset_data.get('available'):
+        sync_key = sync_dataset_data.get('cache_key')
+        if sync_key == cache_key:
+            dataset = _restore_sync_dataset(sync_dataset_data)
     if dataset is None:
-        dataset = _load_sync_dataset_cached_only(tail_ratio, ws, actual_mode, granularity)
-
-    if not sync_dataset_data or not sync_dataset_data.get('available'):
-        if dataset is None:
-            empty.add_annotation(
-                text="未找到同步范围缓存，请先运行预计算脚本。",
-                x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-            empty_kde.add_annotation(
-                text="未找到 KDE 缓存，请先运行预计算脚本。",
-                x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-            return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
+        empty.add_annotation(
+            text="未找到同步范围缓存，请先运行预计算脚本。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        empty_kde.add_annotation(
+            text="未找到 KDE 缓存，请先运行预计算脚本。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
 
     current = _compute_current_sync_points(cache, ws, smooth_mode)
     if dataset is None or current is None:
