@@ -45,7 +45,7 @@ SYNC_CONFIDENCE = 0.95
 SYNC_PLOT_MAX_POINTS = 2500
 SYNC_CACHE_VERSION = 2
 SYNC_ELLIPSOID_RESOLUTION = 22
-AUTO_TREND_SKIP_POINTS = 3
+AUTO_TREND_SKIP_POINTS = 2
 SHOW_MODAL_STYLE = {
     'display': 'flex', 'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%',
     'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': 9999,
