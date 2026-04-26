@@ -1438,37 +1438,15 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
             line=dict(color=DIFF_RELATION_COLORS['next'], width=2), marker=dict(size=4, color='#64B5F6'),
             text=next_series['hover'], hoverinfo='text', customdata=next_series['turns']))
 
-    for strategy, dots in diff_series['strategy_prev'].items():
-        fig.add_trace(go.Scatter(
-            x=dots['x'], y=dots['y'], mode='markers', name=strategy,
-            marker=dict(size=9, color=STRATEGY_COLORS.get(strategy, '#BDBDBD'),
-                        symbol='triangle-left', opacity=0.85),
-            hovertext=dots['hover'], hoverinfo='text', showlegend=False, customdata=dots['turns']))
-    for strategy, dots in diff_series['strategy_next'].items():
-        fig.add_trace(go.Scatter(
-            x=dots['x'], y=dots['y'], mode='markers', name=strategy,
-            marker=dict(size=9, color=STRATEGY_COLORS.get(strategy, '#BDBDBD'),
-                        symbol='triangle-right', opacity=0.85),
-            hovertext=dots['hover'], hoverinfo='text', showlegend=False, customdata=dots['turns']))
-
     auto_markers = (
         _build_auto_diff_markers(dim, 'prev', prev_series, cache.get('conv_id')) +
         _build_auto_diff_markers(dim, 'next', next_series, cache.get('conv_id')))
     for marker in auto_markers:
-        trend_text = '升段' if marker['trend'] == 'rise' else '降段'
         trend_symbol = 'triangle-up' if marker['trend'] == 'rise' else 'triangle-down'
-        marker_color = '#BF360C' if marker['relation'] == 'prev' else '#64B5F6'
-        marker_x = marker['x'] if marker['relation'] == 'prev' else marker['x'] + 0.45
-        text_position = (
-            'top center' if marker['relation'] == 'prev' and marker['trend'] == 'rise'
-            else 'bottom center' if marker['relation'] == 'prev'
-            else 'middle right'
-        )
+        marker_color = '#BF360C' if marker['relation'] == 'prev' else 'rgba(100,181,246,0.9)'
+        marker_x = marker['x'] if marker['relation'] == 'prev' else marker['x'] + 0.35
         fig.add_trace(go.Scatter(
-            x=[marker_x], y=[marker['y']], mode='markers+text',
-            text=[trend_text],
-            textposition=text_position,
-            textfont=dict(size=11, color=marker_color),
+            x=[marker_x], y=[marker['y']], mode='markers',
             marker=dict(size=14, color=marker_color, symbol=trend_symbol,
                         line=dict(width=1, color='white')),
             hovertext=[
