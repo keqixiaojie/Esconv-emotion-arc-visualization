@@ -1,4 +1,5 @@
 import os, sys, json, re
+from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dash
 from dash import html, dcc, Input, Output, State, ALL, ctx
@@ -12,6 +13,7 @@ LEXICON_PATH = "NRC-VAD-Lexicon-v2.1.txt"
 ESCONV_PATH = "ESConv-strategy.json"
 CACHE_DIR = "src/cache"
 MARKERS_FILE = os.path.join(CACHE_DIR, "markers.json")
+AUTO_MARKERS_FILE = os.path.join(CACHE_DIR, "auto_markers.json")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 vad_extractor = VADExtractor(LEXICON_PATH)
@@ -30,6 +32,20 @@ except Exception as e:
 
 MARKER_COLORS = {'seeker': '#4CAF50', 'supporter': '#2196F3'}
 MARKER_ICONS = {'seeker': '🟢', 'supporter': '🔵'}
+DIFF_RELATION_COLORS = {'prev': '#FF7043', 'next': '#42A5F5'}
+DIM_COLORS = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
+DIM_SHORT = {'valence': 'V', 'arousal': 'A', 'dominance': 'D'}
+RELATION_LABELS = {'prev': '上次supporter', 'next': '下次supporter'}
+TREND_LABELS = {'rise': '首次上升起点', 'fall': '首次下降起点'}
+SYNC_CONFIDENCE = 0.95
+SYNC_PLOT_MAX_POINTS = 2500
+AUTO_TREND_MIN_DELTA = 0.03
+SHOW_MODAL_STYLE = {
+    'display': 'flex', 'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%',
+    'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': 9999,
+    'justifyContent': 'center', 'alignItems': 'center'
+}
+HIDE_MODAL_STYLE = {'display': 'none'}
 # 跟随型冷色系，引导型暖色系，Others灰
 STRATEGY_COLORS = {
     'Question':                    '#42A5F5',  # 蓝
@@ -42,14 +58,19 @@ STRATEGY_COLORS = {
     'Others':                      '#BDBDBD',  # 灰
 }
 
+SYNC_RANGE_MEMORY_CACHE = {}
+
 # 存储格式: { "conv_0": [{"turn":3,"speaker":"seeker","label":"..."}, ...] }
 def _ck(cid): return f"conv_{cid}"
 
-def load_all_markers():
-    if os.path.exists(MARKERS_FILE):
-        with open(MARKERS_FILE, 'r', encoding='utf-8') as f:
+def _load_json_dict(path):
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
+
+def load_all_markers():
+    return _load_json_dict(MARKERS_FILE)
 
 def save_all_markers(data):
     with open(MARKERS_FILE, 'w', encoding='utf-8') as f:
@@ -74,6 +95,441 @@ def update_label(cid, turn, label):
     for m in a.get(k, []):
         if m['turn'] == turn: m['label'] = label; break
     save_all_markers(a); return a.get(k, [])
+
+def load_all_auto_markers():
+    return _load_json_dict(AUTO_MARKERS_FILE)
+
+def save_all_auto_markers(data):
+    with open(AUTO_MARKERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_auto_marker_labels(cid):
+    return load_all_auto_markers().get(_ck(cid), {})
+
+def save_auto_marker_label(cid, marker_id, label):
+    data = load_all_auto_markers()
+    key = _ck(cid)
+    labels = data.get(key, {})
+    if label:
+        labels[marker_id] = label
+    else:
+        labels.pop(marker_id, None)
+    data[key] = labels
+    save_all_auto_markers(data)
+
+def delete_auto_marker_label(cid, marker_id):
+    data = load_all_auto_markers()
+    key = _ck(cid)
+    labels = data.get(key, {})
+    labels.pop(marker_id, None)
+    data[key] = labels
+    save_all_auto_markers(data)
+
+def _build_meta_info(meta, conv_id):
+    return html.Div([
+        html.Span(f"🆔 {meta.get('id', conv_id)}", style={'marginRight': '15px'}),
+        html.Span(f"😟 {meta.get('emotion_type', 'N/A')}", style={'marginRight': '15px'}),
+        html.Span(f"📋 {meta.get('problem_type', 'N/A')}", style={'marginRight': '15px'}),
+        html.Span(f"🔥 初始: {meta.get('initial_emotion_intensity', 'N/A')}",
+                  style={'marginRight': '15px', 'color': '#d32f2f'}),
+        html.Span(f"🌿 最终: {meta.get('final_emotion_intensity', 'N/A')}", style={'color': '#388e3c'}),
+        html.Br(),
+        html.Span(f"📝 {meta.get('situation', 'N/A')}", style={'fontStyle': 'italic'})
+    ])
+
+def _compute_vad_results(utterances, granularity):
+    if granularity == 'sentence' and sent_predictor is not None:
+        return sent_predictor.predict_utterances(utterances), 'sentence'
+    text = esconv_loader.utterances_to_text(utterances)
+    vad_r = vad_extractor.extract(text)
+    tm = esconv_loader.build_turn_mapping(utterances, vad_r)
+    for i, v in enumerate(vad_r):
+        v['turn_info'] = tm[i] if i < len(tm) and tm[i] else None
+    return vad_r, 'word'
+
+def build_conversation_cache(conv_id, speaker, granularity, persist=True):
+    conv = esconv_loader.get_conversation(conv_id)
+    if not conv:
+        return None, None
+    meta = conv.get('meta', {})
+    dialog = conv.get('dialog', [])
+    utterances = esconv_loader.filter_utterances(dialog, speaker)
+    if not utterances:
+        return {
+            'conv_id': conv_id, 'speaker': speaker, 'granularity': granularity,
+            'results': [], 'dialog': dialog, 'utterances': []
+        }, meta
+
+    vad_results, actual_gran = _compute_vad_results(utterances, granularity)
+    if persist:
+        suffix = '_sent' if actual_gran == 'sentence' else ''
+        cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}{suffix}.json")
+        vad_extractor.save_cache(
+            vad_results, cp,
+            metadata={'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran})
+
+    cache = {
+        'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran,
+        'results': vad_results, 'dialog': dialog, 'utterances': utterances
+    }
+    bg_spk = 'supporter' if speaker == 'seeker' else ('seeker' if speaker == 'supporter' else None)
+    if bg_spk:
+        bg_utts = esconv_loader.filter_utterances(dialog, bg_spk)
+        if bg_utts:
+            bg_results, _ = _compute_vad_results(bg_utts, granularity)
+            cache['bg_speaker'] = bg_spk
+            cache['bg_results'] = bg_results
+            cache['bg_utterances'] = bg_utts
+    return cache, meta
+
+def _utterance_scores_from_results(results, utterances, dim, is_sent):
+    if is_sent:
+        return np.array([r[dim] for r in results], dtype=float)
+    groups = defaultdict(list)
+    for r in results:
+        ti = r.get('turn_info')
+        if ti:
+            groups[ti['turn_index']].append(r[dim])
+    return np.array([
+        float(np.mean(groups[u['turn_index']])) if groups[u['turn_index']] else 0.0
+        for u in utterances
+    ], dtype=float)
+
+def _score_text_block(text, dim, is_sent):
+    if not text.strip():
+        return None
+    if is_sent and sent_predictor is not None:
+        preds = sent_predictor._predict_batch([text])
+        dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
+        return (float(preds[0][dim_idx]) - 3.0) / 2.0
+    wr = vad_extractor.extract(text)
+    return float(np.mean([r[dim] for r in wr])) if wr else None
+
+def _score_utterance_block(block, dim, is_sent):
+    if not block:
+        return None
+    combined = ' '.join(u['content'] for u in block)
+    return _score_text_block(combined, dim, is_sent)
+
+def _compute_smoothed_utterance_curve(dim, ws, smooth_mode, cache):
+    results = cache.get('results', [])
+    utterances = cache.get('utterances', [])
+    is_sent = (cache.get('granularity') == 'sentence')
+    if not results or not utterances:
+        return None, ws - 1
+    use_context = (smooth_mode == 'context' and is_sent)
+    if use_context:
+        if len(utterances) < ws:
+            return None, ws - 1
+        ctx_scores = []
+        for i in range(ws - 1, len(utterances)):
+            combined = ' '.join(u['content'] for u in utterances[i - ws + 1:i + 1])
+            val = _score_text_block(combined, dim, True)
+            ctx_scores.append(0.0 if val is None else float(val))
+        return np.array(ctx_scores, dtype=float), ws - 1
+
+    utt_scores = _utterance_scores_from_results(results, utterances, dim, is_sent)
+    if len(utt_scores) < ws:
+        return None, ws - 1
+    return smooth_scores(utt_scores, ws), ws - 1
+
+def _build_turn_x_helpers(results, utterances, is_sent):
+    if is_sent:
+        word_counts = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances]
+        word_starts, cum = [], 0
+        for c in word_counts:
+            word_starts.append(cum)
+            cum += c
+
+        def xmid(i): return float(word_starts[i] + (word_counts[i] - 1) / 2.0)
+        def xbg(i): return float(word_starts[i])
+
+        return xmid, xbg, {u['turn_index']: xmid(i) for i, u in enumerate(utterances)}
+
+    turn_word_ranges = {}
+    for idx, r in enumerate(results):
+        ti = r.get('turn_info')
+        if ti:
+            turn_idx = ti['turn_index']
+            turn_word_ranges[turn_idx] = (
+                turn_word_ranges[turn_idx][0] if turn_idx in turn_word_ranges else idx, idx)
+
+    def xmid(i):
+        turn_idx = utterances[i]['turn_index']
+        lo, hi = turn_word_ranges.get(turn_idx, (i, i))
+        return float((lo + hi) / 2.0)
+
+    def xbg(i): return xmid(i)
+
+    return xmid, xbg, {u['turn_index']: xmid(i) for i, u in enumerate(utterances)}
+
+def _interpolate_turn_x(turn_to_x, turn_idx):
+    if turn_idx in turn_to_x:
+        return turn_to_x[turn_idx]
+    keys = sorted(turn_to_x.keys())
+    if not keys:
+        return None
+    lo = max((k for k in keys if k <= turn_idx), default=keys[0])
+    hi = min((k for k in keys if k >= turn_idx), default=keys[-1])
+    if lo == hi:
+        return turn_to_x[lo]
+    return turn_to_x[lo] + (turn_idx - lo) / (hi - lo) * (turn_to_x[hi] - turn_to_x[lo])
+
+def _build_supporter_blocks(bg_utterances, seeker_turns):
+    seeker_turn_set = set(seeker_turns)
+    supp_blocks = []
+    if not bg_utterances:
+        return supp_blocks
+    current = [bg_utterances[0]]
+    for utt in bg_utterances[1:]:
+        if any(current[-1]['turn_index'] < st < utt['turn_index'] for st in seeker_turn_set):
+            supp_blocks.append(current)
+            current = [utt]
+        else:
+            current.append(utt)
+    supp_blocks.append(current)
+    return supp_blocks
+
+def _compute_diff_series(dim, ws, smooth_mode, cache):
+    empty = {'prev': None, 'next': None}
+    if not cache or not cache.get('results') or not cache.get('bg_utterances'):
+        return None
+
+    utterances = cache.get('utterances', [])
+    bg_utterances = cache.get('bg_utterances', [])
+    if not utterances or not bg_utterances:
+        return None
+
+    seeker_smooth, valid_start = _compute_smoothed_utterance_curve(dim, ws, smooth_mode, cache)
+    if seeker_smooth is None or len(seeker_smooth) == 0:
+        return None
+
+    is_sent = (cache.get('granularity') == 'sentence')
+    xmid, xbg, turn_to_x = _build_turn_x_helpers(cache.get('results', []), utterances, is_sent)
+    seeker_turns = [u['turn_index'] for u in utterances]
+    supp_blocks = _build_supporter_blocks(bg_utterances, seeker_turns)
+
+    def nearest_prev_block(turn_idx):
+        cands = [b for b in supp_blocks if b[-1]['turn_index'] < turn_idx]
+        return max(cands, key=lambda b: b[-1]['turn_index']) if cands else None
+
+    def nearest_next_block(turn_idx):
+        cands = [b for b in supp_blocks if b[0]['turn_index'] > turn_idx]
+        return min(cands, key=lambda b: b[0]['turn_index']) if cands else None
+
+    rel_data = {
+        'prev': {'x': [], 'y': [], 'turns': [], 'hover': [], 'strategies': [], 'strategy_summary': []},
+        'next': {'x': [], 'y': [], 'turns': [], 'hover': [], 'strategies': [], 'strategy_summary': []},
+    }
+    strategy_dots = {
+        'prev': defaultdict(lambda: {'x': [], 'y': [], 'hover': [], 'turns': []}),
+        'next': defaultdict(lambda: {'x': [], 'y': [], 'hover': [], 'turns': []}),
+    }
+    seeker_curve = {'x': [], 'y': [], 'turns': []}
+
+    for j, sv in enumerate(seeker_smooth):
+        utt_idx = j + valid_start
+        if utt_idx >= len(utterances):
+            continue
+        seeker_turn = seeker_turns[utt_idx]
+        prev_blk = nearest_prev_block(seeker_turn)
+        next_blk = nearest_next_block(seeker_turn)
+        xm = xmid(utt_idx)
+        seeker_curve['x'].append(xbg(utt_idx))
+        seeker_curve['y'].append(float(sv))
+        seeker_curve['turns'].append(seeker_turn)
+
+        prev_turn = seeker_turns[utt_idx - 1] if utt_idx > 0 else -1
+        next_turn = seeker_turns[utt_idx + 1] if utt_idx < len(seeker_turns) - 1 else float('inf')
+
+        for relation, block, immediate in [
+            ('prev', prev_blk, prev_blk is not None and all(prev_turn < u['turn_index'] < seeker_turn for u in prev_blk)),
+            ('next', next_blk, next_blk is not None and all(seeker_turn < u['turn_index'] < next_turn for u in next_blk)),
+        ]:
+            other_score = _score_utterance_block(block, dim, is_sent)
+            if other_score is None:
+                continue
+            delta = float(sv) - other_score
+            strategies = [u.get('strategy') or 'Others' for u in block]
+            strategy_summary = ', '.join(dict.fromkeys(strategies)) if strategies else 'Others'
+            span = f"T[{block[0]['turn_index']}~{block[-1]['turn_index']}]"
+            rel_data[relation]['x'].append(xm)
+            rel_data[relation]['y'].append(delta)
+            rel_data[relation]['turns'].append(seeker_turn)
+            rel_data[relation]['strategies'].append(strategies)
+            rel_data[relation]['strategy_summary'].append(strategy_summary)
+            rel_data[relation]['hover'].append(
+                f"T[{seeker_turn}] Δ{DIM_SHORT[dim]}={delta:.3f}<br>"
+                f"{RELATION_LABELS[relation]}: {strategy_summary}<br>supporter段: {span}")
+            if immediate:
+                for offset_idx, strategy in enumerate(dict.fromkeys(strategies)):
+                    x_offset = xm - (offset_idx + 1) * 1.0 if relation == 'prev' else xm + (offset_idx + 1) * 1.0
+                    strategy_dots[relation][strategy]['x'].append(x_offset)
+                    strategy_dots[relation][strategy]['y'].append(delta)
+                    strategy_dots[relation][strategy]['hover'].append(
+                        f"T[{seeker_turn}] | {RELATION_LABELS[relation]}策略: {strategy}")
+                    strategy_dots[relation][strategy]['turns'].append(seeker_turn)
+
+    return {
+        'is_sent': is_sent,
+        'turn_to_x': turn_to_x,
+        'seeker_curve': seeker_curve,
+        'prev': rel_data['prev'],
+        'next': rel_data['next'],
+        'strategy_prev': strategy_dots['prev'],
+        'strategy_next': strategy_dots['next'],
+    }
+
+def _auto_trend_threshold(values):
+    values = np.asarray(values, dtype=float)
+    if len(values) < 2:
+        return AUTO_TREND_MIN_DELTA
+    diffs = np.diff(values)
+    return max(AUTO_TREND_MIN_DELTA, float(np.nanstd(diffs)) * 0.25)
+
+def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
+    if not relation_data or len(relation_data.get('y', [])) < 2:
+        return []
+    labels = get_auto_marker_labels(conv_id)
+    xs = relation_data['x']
+    ys = relation_data['y']
+    turns = relation_data['turns']
+    diffs = np.diff(np.asarray(ys, dtype=float))
+    threshold = _auto_trend_threshold(ys)
+    markers = []
+    for trend, matcher in [('rise', lambda d: d >= threshold), ('fall', lambda d: d <= -threshold)]:
+        start_idx = next((i for i, d in enumerate(diffs) if matcher(d)), None)
+        if start_idx is None:
+            continue
+        strategy_summary = relation_data['strategy_summary'][start_idx] if start_idx < len(relation_data['strategy_summary']) else ''
+        default_label = f"{DIM_SHORT[dim]} {TREND_LABELS[trend]}"
+        if strategy_summary:
+            default_label += f" | {RELATION_LABELS[relation]}: {strategy_summary}"
+        marker_id = f"{relation}:{dim}:{trend}"
+        label = labels.get(marker_id) or default_label
+        markers.append({
+            'marker_id': marker_id,
+            'relation': relation,
+            'dim': dim,
+            'trend': trend,
+            'x': xs[start_idx],
+            'y': ys[start_idx],
+            'turn': turns[start_idx],
+            'label': label,
+            'default_label': default_label,
+            'slope': float(diffs[start_idx]),
+        })
+    return markers
+
+def _parse_turn_from_customdata(customdata):
+    if isinstance(customdata, dict):
+        return customdata.get('turn')
+    if isinstance(customdata, (int, np.integer)):
+        return int(customdata)
+    if isinstance(customdata, float) and customdata >= 0 and customdata.is_integer():
+        return int(customdata)
+    return None
+
+def _sample_points(points, max_points=SYNC_PLOT_MAX_POINTS):
+    if points is None or len(points) <= max_points:
+        return points
+    idx = np.linspace(0, len(points) - 1, max_points).astype(int)
+    return points[idx]
+
+def _build_sync_box(low, high):
+    x0, y0, z0 = low
+    x1, y1, z1 = high
+    edges = [
+        ((x0, y0, z0), (x1, y0, z0)), ((x0, y1, z0), (x1, y1, z0)),
+        ((x0, y0, z1), (x1, y0, z1)), ((x0, y1, z1), (x1, y1, z1)),
+        ((x0, y0, z0), (x0, y1, z0)), ((x1, y0, z0), (x1, y1, z0)),
+        ((x0, y0, z1), (x0, y1, z1)), ((x1, y0, z1), (x1, y1, z1)),
+        ((x0, y0, z0), (x0, y0, z1)), ((x1, y0, z0), (x1, y0, z1)),
+        ((x0, y1, z0), (x0, y1, z1)), ((x1, y1, z0), (x1, y1, z1)),
+    ]
+    xs, ys, zs = [], [], []
+    for start, end in edges:
+        xs.extend([start[0], end[0], None])
+        ys.extend([start[1], end[1], None])
+        zs.extend([start[2], end[2], None])
+    return go.Scatter3d(
+        x=xs, y=ys, z=zs, mode='lines', name='同步范围',
+        line=dict(color='#2E7D32', width=5), hoverinfo='skip')
+
+def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
+    actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
+    cache_key = (round(float(tail_ratio), 4), int(ws), actual_mode, granularity)
+    if cache_key in SYNC_RANGE_MEMORY_CACHE:
+        return SYNC_RANGE_MEMORY_CACHE[cache_key]
+
+    dataset_points = []
+    used_conversations = 0
+    for conv_id in conv_ids:
+        conv_cache, _ = build_conversation_cache(conv_id, 'seeker', granularity, persist=False)
+        if not conv_cache or not conv_cache.get('bg_utterances'):
+            continue
+        series = {
+            dim: _compute_diff_series(dim, ws, actual_mode, conv_cache)
+            for dim in ['valence', 'arousal', 'dominance']
+        }
+        if any(series[dim] is None or len(series[dim]['prev']['y']) == 0 for dim in series):
+            continue
+        sizes = [len(series[dim]['prev']['y']) for dim in series]
+        size = min(sizes)
+        if size <= 0:
+            continue
+        tail_count = max(1, int(np.ceil(size * tail_ratio)))
+        start_idx = max(0, size - tail_count)
+        stacked = np.column_stack([
+            np.asarray(series['valence']['prev']['y'][:size], dtype=float)[start_idx:],
+            np.asarray(series['arousal']['prev']['y'][:size], dtype=float)[start_idx:],
+            np.asarray(series['dominance']['prev']['y'][:size], dtype=float)[start_idx:],
+        ])
+        if len(stacked) == 0:
+            continue
+        dataset_points.append(stacked)
+        used_conversations += 1
+
+    if not dataset_points:
+        return None
+
+    points = np.vstack(dataset_points)
+    alpha = (1.0 - SYNC_CONFIDENCE) / 2.0
+    result = {
+        'points': points,
+        'low': np.quantile(points, alpha, axis=0),
+        'high': np.quantile(points, 1.0 - alpha, axis=0),
+        'used_conversations': used_conversations,
+        'tail_ratio': tail_ratio,
+        'confidence': SYNC_CONFIDENCE,
+        'granularity': granularity,
+        'smooth_mode': actual_mode,
+    }
+    SYNC_RANGE_MEMORY_CACHE[cache_key] = result
+    return result
+
+def _compute_current_sync_points(cache, ws, smooth_mode):
+    if not cache or cache.get('speaker') != 'seeker':
+        return None
+    actual_mode = 'context' if smooth_mode == 'context' and cache.get('granularity') == 'sentence' else 'avg'
+    series = {
+        dim: _compute_diff_series(dim, ws, actual_mode, cache)
+        for dim in ['valence', 'arousal', 'dominance']
+    }
+    if any(series[dim] is None or len(series[dim]['prev']['y']) == 0 for dim in series):
+        return None
+    sizes = [len(series[dim]['prev']['y']) for dim in series]
+    size = min(sizes)
+    if size <= 0:
+        return None
+    return {
+        'points': np.column_stack([
+            np.asarray(series['valence']['prev']['y'][:size], dtype=float),
+            np.asarray(series['arousal']['prev']['y'][:size], dtype=float),
+            np.asarray(series['dominance']['prev']['y'][:size], dtype=float),
+        ]),
+        'turns': series['valence']['prev']['turns'][:size]
+    }
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "ESConv 对话情感弧线分析"
@@ -161,8 +617,32 @@ app.layout = html.Div([
             dcc.Graph(id='graph-diff-dominance'),
         ])
     ], style={'marginTop': '8px', 'borderTop': '1px solid #ddd', 'paddingTop': '4px'}),
+    html.Div([
+        html.Div("🧭 同步范围（基于 seeker − 上次supporter 的三维状态差值）",
+                 style={'fontSize': '13px', 'fontWeight': 'bold', 'padding': '8px 12px 4px',
+                        'color': '#555'}),
+        html.Div([
+            html.Div([
+                html.Label("尾段范围:", style={'fontWeight': 'bold'}),
+                dcc.Slider(
+                    id='sync-tail-slider', min=10, max=50, step=5, value=25,
+                    marks={i: f"{i}%" for i in range(10, 55, 10)},
+                    tooltip={"placement": "bottom", "always_visible": True})
+            ], style={'width': '55%', 'display': 'inline-block', 'verticalAlign': 'middle'}),
+            html.Div(
+                "按状态差值图横坐标的最后 X% 截取，再汇总全数据分布。",
+                style={'display': 'inline-block', 'marginLeft': '30px', 'fontSize': '12px', 'color': '#666'})
+        ], style={'padding': '8px 12px'}),
+        dcc.Loading(type='circle', color='#666', children=[
+            dcc.Graph(id='graph-sync-3d'),
+            html.Div(id='sync-info', style={
+                'padding': '6px 12px', 'fontSize': '12px', 'color': '#555',
+                'backgroundColor': '#f8f9fa', 'borderRadius': '6px', 'marginTop': '4px'})
+        ])
+    ], style={'marginTop': '8px', 'borderTop': '1px solid #ddd', 'paddingTop': '4px'}),
     # 标签编辑弹窗
-    dcc.Store(id='editing-turn', data=None),
+    dcc.Store(id='editing-target', data=None),
+    dcc.Store(id='auto-marker-revision', data=0),
     html.Div(id='label-modal-container', children=[
         html.Div(id='label-modal', children=[
             html.Div([
@@ -216,56 +696,18 @@ app.clientside_callback(
     Input('speaker-radio', 'value'),
     Input('granularity-radio', 'value'))
 def on_conv_change(conv_id, speaker, granularity):
-    if conv_id is None: return None, "请选择对话", []
-    conv = esconv_loader.get_conversation(conv_id)
-    if not conv: return None, f"未找到 #{conv_id}", []
-    meta = conv.get('meta', {}); dialog = conv.get('dialog', [])
-    meta_el = html.Div([
-        html.Span(f"🆔 {meta.get('id', conv_id)}", style={'marginRight': '15px'}),
-        html.Span(f"😟 {meta.get('emotion_type', 'N/A')}", style={'marginRight': '15px'}),
-        html.Span(f"📋 {meta.get('problem_type', 'N/A')}", style={'marginRight': '15px'}),
-        html.Span(f"🔥 初始: {meta.get('initial_emotion_intensity', 'N/A')}", style={'marginRight': '15px', 'color': '#d32f2f'}),
-        html.Span(f"🌿 最终: {meta.get('final_emotion_intensity', 'N/A')}", style={'color': '#388e3c'}),
-        html.Br(),
-        html.Span(f"📝 {meta.get('situation', 'N/A')}", style={'fontStyle': 'italic'})])
-    utterances = esconv_loader.filter_utterances(dialog, speaker)
-    if not utterances: return None, meta_el, get_conv_markers(conv_id)
-
-    def _compute_vad(utts):
-        if granularity == 'sentence' and sent_predictor is not None:
-            return sent_predictor.predict_utterances(utts), 'sentence'
-        text = esconv_loader.utterances_to_text(utts)
-        vad_r = vad_extractor.extract(text)
-        tm = esconv_loader.build_turn_mapping(utts, vad_r)
-        for i, v in enumerate(vad_r):
-            v['turn_info'] = tm[i] if i < len(tm) and tm[i] else None
-        return vad_r, 'word'
-
-    vad_results, actual_gran = _compute_vad(utterances)
-    suffix = '_sent' if actual_gran == 'sentence' else ''
-    cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}{suffix}.json")
-    vad_extractor.save_cache(vad_results, cp, metadata={'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran})
-
-    cache = {'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran,
-             'results': vad_results, 'dialog': dialog, 'utterances': utterances}
-
-    # 同时计算背景说话者的弧线
-    bg_spk = 'supporter' if speaker == 'seeker' else ('seeker' if speaker == 'supporter' else None)
-    if bg_spk:
-        bg_utts = esconv_loader.filter_utterances(dialog, bg_spk)
-        if bg_utts:
-            bg_results, _ = _compute_vad(bg_utts)
-            cache['bg_speaker'] = bg_spk
-            cache['bg_results'] = bg_results
-            cache['bg_utterances'] = bg_utts
-
-    return cache, meta_el, get_conv_markers(conv_id)
+    if conv_id is None:
+        return None, "请选择对话", []
+    cache, meta = build_conversation_cache(conv_id, speaker, granularity, persist=True)
+    if cache is None:
+        return None, f"未找到 #{conv_id}", []
+    return cache, _build_meta_info(meta or {}, conv_id), get_conv_markers(conv_id)
 
 
 # 点击轮次：未标记→新增；已标记→打开编辑弹窗
 @app.callback(
     Output('markers-store', 'data', allow_duplicate=True),
-    Output('editing-turn', 'data'),
+    Output('editing-target', 'data'),
     Output('label-input', 'value'),
     Output('label-modal', 'style'),
     Output('modal-title', 'children'),
@@ -275,54 +717,97 @@ def on_conv_change(conv_id, speaker, granularity):
     State('markers-store', 'data'),
     prevent_initial_call=True)
 def on_turn_click(all_clicks, conv_id, cache, markers):
-    no_modal = {'display': 'none'}
-    show_modal = {'display': 'flex', 'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%',
-                  'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': 9999,
-                  'justifyContent': 'center', 'alignItems': 'center'}
     if not ctx.triggered_id or conv_id is None or not cache:
-        return dash.no_update, dash.no_update, dash.no_update, no_modal, ""
+        return dash.no_update, dash.no_update, dash.no_update, HIDE_MODAL_STYLE, ""
     turn_idx = ctx.triggered_id['index']
     if not all_clicks or sum(c for c in all_clicks if c) == 0:
-        return dash.no_update, dash.no_update, dash.no_update, no_modal, ""
+        return dash.no_update, dash.no_update, dash.no_update, HIDE_MODAL_STYLE, ""
     markers = markers or []
     existing = [m for m in markers if m['turn'] == turn_idx]
     if existing:
         lbl = existing[0].get('label', '')
         spk = existing[0].get('speaker', '')
         icon = MARKER_ICONS.get(spk, '📌')
-        return dash.no_update, turn_idx, lbl, show_modal, f"编辑拐点标签 {icon} 轮次[{turn_idx}]"
+        return (
+            dash.no_update,
+            {'type': 'manual', 'turn': turn_idx},
+            lbl,
+            SHOW_MODAL_STYLE,
+            f"编辑拐点标签 {icon} 轮次[{turn_idx}]")
     else:
         dialog = cache.get('dialog', [])
         spk = dialog[turn_idx].get('speaker', 'seeker') if turn_idx < len(dialog) else 'seeker'
         new_markers = add_marker(conv_id, turn_idx, spk)
-        return new_markers, dash.no_update, dash.no_update, no_modal, ""
+        return new_markers, dash.no_update, dash.no_update, HIDE_MODAL_STYLE, ""
+
+
+@app.callback(
+    Output('editing-target', 'data', allow_duplicate=True),
+    Output('label-input', 'value', allow_duplicate=True),
+    Output('label-modal', 'style', allow_duplicate=True),
+    Output('modal-title', 'children', allow_duplicate=True),
+    Input('graph-diff-valence', 'clickData'),
+    Input('graph-diff-arousal', 'clickData'),
+    Input('graph-diff-dominance', 'clickData'),
+    State('conv-id-dropdown', 'value'),
+    prevent_initial_call=True)
+def on_diff_marker_click(click_v, click_a, click_d, conv_id):
+    click_map = {
+        'graph-diff-valence': click_v,
+        'graph-diff-arousal': click_a,
+        'graph-diff-dominance': click_d,
+    }
+    click_data = click_map.get(ctx.triggered_id) or click_v or click_a or click_d
+    if conv_id is None or not click_data or 'points' not in click_data or not click_data['points']:
+        return dash.no_update, dash.no_update, HIDE_MODAL_STYLE, dash.no_update
+    customdata = click_data['points'][0].get('customdata')
+    if not isinstance(customdata, dict) or customdata.get('kind') != 'auto-marker':
+        return dash.no_update, dash.no_update, HIDE_MODAL_STYLE, dash.no_update
+    marker_id = customdata.get('marker_id')
+    label = get_auto_marker_labels(conv_id).get(marker_id, customdata.get('default_label', ''))
+    title = f"编辑自动标记 {customdata.get('display', '')}（删除=恢复默认）"
+    return customdata, label, SHOW_MODAL_STYLE, title
 
 
 # 弹窗按钮操作
 @app.callback(
     Output('markers-store', 'data', allow_duplicate=True),
     Output('label-modal', 'style', allow_duplicate=True),
-    Output('editing-turn', 'data', allow_duplicate=True),
+    Output('editing-target', 'data', allow_duplicate=True),
+    Output('auto-marker-revision', 'data'),
     Input('btn-save-label', 'n_clicks'),
     Input('btn-delete-marker', 'n_clicks'),
     Input('btn-cancel-modal', 'n_clicks'),
-    State('editing-turn', 'data'),
+    State('editing-target', 'data'),
     State('label-input', 'value'),
     State('conv-id-dropdown', 'value'),
+    State('auto-marker-revision', 'data'),
     prevent_initial_call=True)
-def on_modal_action(save_c, del_c, cancel_c, editing_turn, label_val, conv_id):
-    no_modal = {'display': 'none'}
-    if not ctx.triggered_id or editing_turn is None or conv_id is None:
-        return dash.no_update, no_modal, None
-    tid = ctx.triggered_id
-    if tid == 'btn-save-label':
-        new_m = update_label(conv_id, editing_turn, label_val or '')
-        return new_m, no_modal, None
-    elif tid == 'btn-delete-marker':
-        new_m = remove_marker(conv_id, editing_turn)
-        return new_m, no_modal, None
-    else:
-        return dash.no_update, no_modal, None
+def on_modal_action(save_c, del_c, cancel_c, editing_target, label_val, conv_id, auto_rev):
+    if not ctx.triggered_id or editing_target is None or conv_id is None:
+        return dash.no_update, HIDE_MODAL_STYLE, None, dash.no_update
+
+    target_type = editing_target.get('type')
+    trigger = ctx.triggered_id
+    if trigger == 'btn-cancel-modal':
+        return dash.no_update, HIDE_MODAL_STYLE, None, dash.no_update
+
+    if target_type == 'manual':
+        turn_idx = editing_target.get('turn')
+        if trigger == 'btn-save-label':
+            return update_label(conv_id, turn_idx, label_val or ''), HIDE_MODAL_STYLE, None, dash.no_update
+        if trigger == 'btn-delete-marker':
+            return remove_marker(conv_id, turn_idx), HIDE_MODAL_STYLE, None, dash.no_update
+    elif target_type == 'auto-marker':
+        marker_id = editing_target.get('marker_id')
+        if trigger == 'btn-save-label':
+            save_auto_marker_label(conv_id, marker_id, (label_val or '').strip())
+            return dash.no_update, HIDE_MODAL_STYLE, None, (auto_rev or 0) + 1
+        if trigger == 'btn-delete-marker':
+            delete_auto_marker_label(conv_id, marker_id)
+            return dash.no_update, HIDE_MODAL_STYLE, None, (auto_rev or 0) + 1
+
+    return dash.no_update, HIDE_MODAL_STYLE, None, dash.no_update
 
 
 @app.callback(
@@ -715,189 +1200,89 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
                         height=220, margin=dict(l=40, r=20, t=35, b=25))
     if not cache or not cache.get('results') or not cache.get('bg_utterances'):
         return empty
-
-    results = cache['results']
-    utterances = cache.get('utterances', [])
-    bg_utterances = cache.get('bg_utterances', [])
-    gran = cache.get('granularity', 'word')
-    is_sent = (gran == 'sentence')
-    if not utterances or not bg_utterances:
+    diff_series = _compute_diff_series(dim, ws, smooth_mode, cache)
+    if diff_series is None:
         return empty
 
-    # ---- seeker 每句平滑 VAD（与主图对齐）----
-    scores = np.array([r[dim] for r in results])
-    if smooth_mode == 'context' and is_sent and sent_predictor is not None:
-        seeker_smooth_list = []
-        for i in range(ws - 1, len(utterances)):
-            combined = ' '.join(u['content'] for u in utterances[i - ws + 1: i + 1])
-            preds = sent_predictor._predict_batch([combined])
-            dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
-            seeker_smooth_list.append((float(preds[0][dim_idx]) - 3.0) / 2.0)
-        seeker_smooth = np.array(seeker_smooth_list)
-    else:
-        if is_sent:
-            utt_scores = scores
-        else:
-            from collections import defaultdict as _dda
-            grp = _dda(list)
-            for r in results:
-                ti = r.get('turn_info')
-                if ti: grp[ti['turn_index']].append(r[dim])
-            utt_scores = np.array([
-                float(np.mean(grp[u['turn_index']])) if grp[u['turn_index']] else 0.0
-                for u in utterances])
-        if len(utt_scores) < ws:
-            return empty
-        seeker_smooth = smooth_scores(utt_scores, ws)
-    valid_start = ws - 1
-
-    # ---- x 坐标（与主图对齐）----
-    if is_sent:
-        wcs = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances]
-        ws_arr, cum = [], 0
-        for c in wcs:
-            ws_arr.append(cum); cum += c
-        def xmid(i): return float(ws_arr[i] + (wcs[i] - 1) / 2)
-        def xbg(i):  return float(ws_arr[i])   # 阶梯线从句子起点开始
-    else:
-        twr = {}
-        for idx, r in enumerate(results):
-            ti = r.get('turn_info')
-            if ti:
-                T = ti['turn_index']
-                twr[T] = (twr[T][0] if T in twr else idx, idx)
-        def xmid(i):
-            T = utterances[i]['turn_index']
-            lo, hi = twr.get(T, (i, i))
-            return float((lo + hi) / 2)
-        def xbg(i): return xmid(i)   # 词粒度无阶梯，中点即可
-
-    # ---- 差值计算 ----
-    seeker_turns = [u['turn_index'] for u in utterances]
-    seeker_turn_set = set(seeker_turns)
-
-    def block_vad(block):
-        if not block: return None
-        combined = ' '.join(u['content'] for u in block)
-        if is_sent and sent_predictor is not None:
-            preds = sent_predictor._predict_batch([combined])
-            dim_idx = {'valence': 0, 'arousal': 1, 'dominance': 2}[dim]
-            return (float(preds[0][dim_idx]) - 3.0) / 2.0
-        vr = vad_extractor.extract(combined)
-        return float(np.mean([r[dim] for r in vr])) if vr else None
-
-    # 将 supporter 话语按"中间是否有 seeker 插话"切成连续块
-    supp_blocks = []
-    if bg_utterances:
-        cur = [bg_utterances[0]]
-        for u in bg_utterances[1:]:
-            if any(cur[-1]['turn_index'] < st < u['turn_index'] for st in seeker_turn_set):
-                supp_blocks.append(cur); cur = [u]
-            else:
-                cur.append(u)
-        supp_blocks.append(cur)
-
-    def nearest_prev_block(T):
-        cands = [b for b in supp_blocks if b[-1]['turn_index'] < T]
-        return max(cands, key=lambda b: b[-1]['turn_index']) if cands else None
-
-    def nearest_next_block(T):
-        cands = [b for b in supp_blocks if b[0]['turn_index'] > T]
-        return min(cands, key=lambda b: b[0]['turn_index']) if cands else None
-
-    dp_x, dp_y, dp_hover = [], [], []
-    dn_x, dn_y, dn_hover = [], [], []
-    bg_x, bg_y = [], []
-    from collections import defaultdict as _ddb
-    sp_dots = _ddb(lambda: {'x': [], 'y': []})
-    sn_dots = _ddb(lambda: {'x': [], 'y': []})
-
-    for j, sv in enumerate(seeker_smooth):
-        i = j + valid_start
-        if i >= len(utterances): continue
-        T = seeker_turns[i]
-        prev_blk = nearest_prev_block(T)
-        next_blk = nearest_next_block(T)
-        xm = xmid(i)
-        bg_x.append(xbg(i)); bg_y.append(float(sv))
-
-        T_p = seeker_turns[i - 1] if i > 0 else -1
-        T_n = seeker_turns[i + 1] if i < len(seeker_turns) - 1 else float('inf')
-        prev_immediate = prev_blk is not None and all(T_p < u['turn_index'] < T for u in prev_blk)
-        next_immediate = next_blk is not None and all(T < u['turn_index'] < T_n for u in next_blk)
-
-        pv = block_vad(prev_blk)
-        if pv is not None:
-            d = float(sv) - pv
-            dp_x.append(xm); dp_y.append(d)
-            strats = [u.get('strategy') or 'Others' for u in prev_blk]
-            dp_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
-            if prev_immediate:
-                for k, s in enumerate(dict.fromkeys(strats)):
-                    sp_dots[s]['x'].append(xm - (k + 1) * 1.0)
-                    sp_dots[s]['y'].append(d)
-
-        nv = block_vad(next_blk)
-        if nv is not None:
-            d = float(sv) - nv
-            dn_x.append(xm); dn_y.append(d)
-            strats = [u.get('strategy') or 'Others' for u in next_blk]
-            dn_hover.append(f"T[{T}] Δ{dim[0].upper()}={d:.3f}<br>策略: {', '.join(strats)}")
-            if next_immediate:
-                for k, s in enumerate(dict.fromkeys(strats)):
-                    sn_dots[s]['x'].append(xm + (k + 1) * 1.0)
-                    sn_dots[s]['y'].append(d)
-
-    # ---- 画图 ----
-    clr = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
+    utterances = cache.get('utterances', [])
+    prev_series = diff_series['prev']
+    next_series = diff_series['next']
+    bg_series = diff_series['seeker_curve']
+    is_sent = diff_series['is_sent']
     fig = go.Figure()
-    # seeker 原始弧线（背景，浅色，双轴右侧）
     bg_shape = 'hv' if is_sent else 'linear'
-    if bg_x:
-        fig.add_trace(go.Scatter(x=bg_x, y=bg_y, mode='lines', name=f'{dim.capitalize()} (seeker)',
-            line=dict(color=clr.get(dim, 'gray'), width=1.5, dash='dot', shape=bg_shape),
+    if bg_series['x']:
+        fig.add_trace(go.Scatter(
+            x=bg_series['x'], y=bg_series['y'], mode='lines', name=f'{dim.capitalize()} (seeker)',
+            line=dict(color=DIM_COLORS.get(dim, 'gray'), width=1.5, dash='dot', shape=bg_shape),
             opacity=0.3, yaxis='y2', hoverinfo='skip'))
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.3)
-    if dp_x:
-        fig.add_trace(go.Scatter(x=dp_x, y=dp_y, mode='lines+markers',
-            name='seeker − prev_supp（被引导）',
-            line=dict(color='#FF7043', width=2), marker=dict(size=5),
-            text=dp_hover, hoverinfo='text'))
-    if dn_x:
-        fig.add_trace(go.Scatter(x=dn_x, y=dn_y, mode='lines+markers',
-            name='seeker − next_supp（附和）',
-            line=dict(color='#42A5F5', width=2), marker=dict(size=5),
-            text=dn_hover, hoverinfo='text'))
-    for s, d in sp_dots.items():
-        fig.add_trace(go.Scatter(x=d['x'], y=d['y'], mode='markers', name=s,
-            marker=dict(size=9, color=STRATEGY_COLORS.get(s, '#BDBDBD'),
-                        symbol='triangle-left', opacity=0.85),
-            hovertext=s, hoverinfo='text', showlegend=False))
-    for s, d in sn_dots.items():
-        fig.add_trace(go.Scatter(x=d['x'], y=d['y'], mode='markers', name=s,
-            marker=dict(size=9, color=STRATEGY_COLORS.get(s, '#BDBDBD'),
-                        symbol='triangle-right', opacity=0.85),
-            hovertext=s, hoverinfo='text', showlegend=False))
-    # 拐点标记
-    if markers and mf:
-        # 建立 seeker turn_index → xmid 映射
-        sk_turn_to_x = {utterances[i]['turn_index']: xmid(i) for i in range(len(utterances))}
-        # supporter turn → 在 seeker x 轴上插值
-        sk_turn_keys = sorted(sk_turn_to_x.keys())
-        def supp_x(T):
-            if not sk_turn_keys: return None
-            lo = max((k for k in sk_turn_keys if k <= T), default=sk_turn_keys[0])
-            hi = min((k for k in sk_turn_keys if k >= T), default=sk_turn_keys[-1])
-            if lo == hi: return sk_turn_to_x[lo]
-            return sk_turn_to_x[lo] + (T - lo) / (hi - lo) * (sk_turn_to_x[hi] - sk_turn_to_x[lo])
 
+    if prev_series['x']:
+        fig.add_trace(go.Scatter(
+            x=prev_series['x'], y=prev_series['y'], mode='lines+markers',
+            name='seeker − prev_supp（被引导）',
+            line=dict(color=DIFF_RELATION_COLORS['prev'], width=2), marker=dict(size=5),
+            text=prev_series['hover'], hoverinfo='text', customdata=prev_series['turns']))
+    if next_series['x']:
+        fig.add_trace(go.Scatter(
+            x=next_series['x'], y=next_series['y'], mode='lines+markers',
+            name='seeker − next_supp（附和）',
+            line=dict(color=DIFF_RELATION_COLORS['next'], width=2), marker=dict(size=5),
+            text=next_series['hover'], hoverinfo='text', customdata=next_series['turns']))
+
+    for strategy, dots in diff_series['strategy_prev'].items():
+        fig.add_trace(go.Scatter(
+            x=dots['x'], y=dots['y'], mode='markers', name=strategy,
+            marker=dict(size=9, color=STRATEGY_COLORS.get(strategy, '#BDBDBD'),
+                        symbol='triangle-left', opacity=0.85),
+            hovertext=dots['hover'], hoverinfo='text', showlegend=False, customdata=dots['turns']))
+    for strategy, dots in diff_series['strategy_next'].items():
+        fig.add_trace(go.Scatter(
+            x=dots['x'], y=dots['y'], mode='markers', name=strategy,
+            marker=dict(size=9, color=STRATEGY_COLORS.get(strategy, '#BDBDBD'),
+                        symbol='triangle-right', opacity=0.85),
+            hovertext=dots['hover'], hoverinfo='text', showlegend=False, customdata=dots['turns']))
+
+    auto_markers = (
+        _build_auto_diff_markers(dim, 'prev', prev_series, cache.get('conv_id')) +
+        _build_auto_diff_markers(dim, 'next', next_series, cache.get('conv_id')))
+    for marker in auto_markers:
+        trend_text = '首升' if marker['trend'] == 'rise' else '首降'
+        trend_symbol = 'triangle-up' if marker['trend'] == 'rise' else 'triangle-down'
+        marker_color = '#BF360C' if marker['relation'] == 'prev' else '#0D47A1'
+        fig.add_trace(go.Scatter(
+            x=[marker['x']], y=[marker['y']], mode='markers+text',
+            text=[trend_text],
+            textposition='top center' if marker['trend'] == 'rise' else 'bottom center',
+            marker=dict(size=12, color=marker_color, symbol=trend_symbol,
+                        line=dict(width=1, color='white')),
+            hovertext=[
+                f"T[{marker['turn']}] {marker['label']}<br>"
+                f"下一跳变化: {marker['slope']:+.3f}<br>点击可编辑"
+            ],
+            hoverinfo='text',
+            customdata=[{
+                'kind': 'auto-marker',
+                'type': 'auto-marker',
+                'marker_id': marker['marker_id'],
+                'turn': marker['turn'],
+                'display': f"{dim.capitalize()} | {RELATION_LABELS[marker['relation']]} | {TREND_LABELS[marker['trend']]}",
+                'default_label': marker['default_label']
+            }],
+            name=f"{RELATION_LABELS[marker['relation']]}{TREND_LABELS[marker['trend']]}",
+            showlegend=False))
+
+    if markers and mf:
         mk_x, mk_y, mk_text, mk_color = [], [], [], []
         for m in markers:
             if m['speaker'] not in mf: continue
             mt = m['turn']; ms = m['speaker']; ml = m.get('label', '')
-            mid_x = sk_turn_to_x.get(mt) if ms != cache.get('bg_speaker') else supp_x(mt)
-            if mid_x is None: mid_x = supp_x(mt)
-            if mid_x is None: continue
+            mid_x = diff_series['turn_to_x'].get(mt)
+            if ms == cache.get('bg_speaker') or mid_x is None:
+                mid_x = _interpolate_turn_x(diff_series['turn_to_x'], mt)
+            if mid_x is None:
+                continue
             mc = MARKER_COLORS.get(ms, '#9c27b0')
             fig.add_vline(x=mid_x, line_dash='dash' if ms == 'seeker' else 'dot',
                           line_color=mc, opacity=0.5, line_width=2)
@@ -933,8 +1318,9 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
     Input('smooth-mode-radio', 'value'),
     Input('vad-cache-store', 'data'),
     Input('markers-store', 'data'),
-    Input('marker-filter', 'value'))
-def update_diff_graphs(ws, smooth_mode, cache, markers, mf):
+    Input('marker-filter', 'value'),
+    Input('auto-marker-revision', 'data'))
+def update_diff_graphs(ws, smooth_mode, cache, markers, mf, _auto_rev):
     figs = [_build_diff_figure(dim, ws, smooth_mode, cache, markers, mf)
             for dim in ['valence', 'arousal', 'dominance']]
     return figs[0], figs[1], figs[2]
@@ -959,21 +1345,143 @@ def update_graphs(ws, smooth_mode, cache, markers, mf):
 
 
 @app.callback(
+    Output('graph-sync-3d', 'figure'),
+    Output('sync-info', 'children'),
+    Input('sync-tail-slider', 'value'),
+    Input('window-slider', 'value'),
+    Input('smooth-mode-radio', 'value'),
+    Input('granularity-radio', 'value'),
+    Input('vad-cache-store', 'data'))
+def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
+    empty = go.Figure()
+    empty.update_layout(
+        title="同步范围三维分布",
+        scene=dict(xaxis_title='ΔValence', yaxis_title='ΔArousal', zaxis_title='ΔDominance'),
+        height=520, margin=dict(l=10, r=10, t=40, b=10))
+
+    if not cache or cache.get('speaker') != 'seeker':
+        empty.add_annotation(
+            text="同步范围当前按 seeker − 上次supporter 计算，请切换到 Seeker 视角。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, "当前仅在 Seeker 视角下计算同步范围和同步率。"
+
+    tail_ratio = (tail_pct or 25) / 100.0
+    dataset = _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity)
+    current = _compute_current_sync_points(cache, ws, smooth_mode)
+    if dataset is None or current is None:
+        empty.add_annotation(
+            text="当前参数下没有足够的差值点可用于同步范围统计。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, "差值点不足，无法计算同步范围。"
+
+    low = np.asarray(dataset['low'], dtype=float)
+    high = np.asarray(dataset['high'], dtype=float)
+    points = current['points']
+    turns = current['turns']
+    inside = np.all((points >= low) & (points <= high), axis=1)
+    sync_rate = float(np.mean(inside)) if len(points) else 0.0
+
+    sampled = _sample_points(dataset['points'])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+        x=sampled[:, 0], y=sampled[:, 1], z=sampled[:, 2],
+        mode='markers', name='全数据尾段分布',
+        marker=dict(size=3, color='rgba(120,120,120,0.30)'),
+        hoverinfo='skip'))
+    fig.add_trace(_build_sync_box(low, high))
+    fig.add_trace(go.Scatter3d(
+        x=points[:, 0], y=points[:, 1], z=points[:, 2],
+        mode='lines', name='当前对话轨迹',
+        line=dict(color='#546E7A', width=5),
+        hovertext=[
+            f"T[{turns[i]}] ΔV={points[i,0]:.3f}<br>ΔA={points[i,1]:.3f}<br>ΔD={points[i,2]:.3f}"
+            for i in range(len(points))
+        ],
+        hoverinfo='text'))
+    if np.any(inside):
+        fig.add_trace(go.Scatter3d(
+            x=points[inside, 0], y=points[inside, 1], z=points[inside, 2],
+            mode='markers', name='同步区内',
+            marker=dict(size=6, color='#2E7D32', opacity=0.95),
+            hovertext=[
+                f"T[{turns[i]}] 在同步范围内"
+                for i in np.where(inside)[0]
+            ],
+            hoverinfo='text'))
+    if np.any(~inside):
+        fig.add_trace(go.Scatter3d(
+            x=points[~inside, 0], y=points[~inside, 1], z=points[~inside, 2],
+            mode='markers', name='同步区外',
+            marker=dict(size=6, color='#C62828', opacity=0.9),
+            hovertext=[
+                f"T[{turns[i]}] 在同步范围外"
+                for i in np.where(~inside)[0]
+            ],
+            hoverinfo='text'))
+
+    fig.update_layout(
+        title=(
+            f"#{cache.get('conv_id', '?')} | 同步范围 3D | 尾段 {tail_pct}% | "
+            f"同步率 {sync_rate:.1%}"
+        ),
+        scene=dict(
+            xaxis_title='ΔValence',
+            yaxis_title='ΔArousal',
+            zaxis_title='ΔDominance',
+            xaxis=dict(range=[-1, 1]),
+            yaxis=dict(range=[-1, 1]),
+            zaxis=dict(range=[-1, 1]),
+            camera=dict(eye=dict(x=1.35, y=1.35, z=1.1))
+        ),
+        height=520, margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
+
+    info = html.Div([
+        html.Span(
+            f"同步率: {sync_rate:.1%}（{int(np.sum(inside))}/{len(points)} 个有效差值时刻）",
+            style={'marginRight': '18px', 'fontWeight': 'bold', 'color': '#2E7D32'}),
+        html.Span(
+            f"同步范围: V[{low[0]:.3f}, {high[0]:.3f}] / "
+            f"A[{low[1]:.3f}, {high[1]:.3f}] / "
+            f"D[{low[2]:.3f}, {high[2]:.3f}]",
+            style={'marginRight': '18px'}),
+        html.Span(
+            f"全数据统计: {dataset['used_conversations']} 个对话，尾段 {tail_pct}% ，"
+            f"{int(dataset['confidence'] * 100)}% 中心区间",
+            style={'color': '#666'})
+    ])
+    return fig, info
+
+
+@app.callback(
     Output('dialog-panel', 'children'),
     Input('graph-valence', 'hoverData'),
     Input('graph-arousal', 'hoverData'),
     Input('graph-dominance', 'hoverData'),
+    Input('graph-diff-valence', 'hoverData'),
+    Input('graph-diff-arousal', 'hoverData'),
+    Input('graph-diff-dominance', 'hoverData'),
     Input('vad-cache-store', 'data'),
     Input('markers-store', 'data'))
-def on_hover_dialog(hoverV, hoverA, hoverD, cache, markers):
-    hoverData = hoverV or hoverA or hoverD
+def on_hover_dialog(hoverV, hoverA, hoverD, hoverDV, hoverDA, hoverDD, cache, markers):
+    hover_map = {
+        'graph-valence': hoverV,
+        'graph-arousal': hoverA,
+        'graph-dominance': hoverD,
+        'graph-diff-valence': hoverDV,
+        'graph-diff-arousal': hoverDA,
+        'graph-diff-dominance': hoverDD,
+    }
+    hoverData = hover_map.get(ctx.triggered_id) or hoverV or hoverA or hoverD or hoverDV or hoverDA or hoverDD
     if not cache or not cache.get('dialog'): return []
     dialog = cache['dialog']; results = cache.get('results', [])
     markers = markers or []; mm = {m['turn']: m for m in markers}
     hl = None
     if hoverData and 'points' in hoverData and hoverData['points']:
         pt = hoverData['points'][0]; cd = pt.get('customdata')
-        if cd is not None and cd >= 0: hl = cd
+        parsed_turn = _parse_turn_from_customdata(cd)
+        if parsed_turn is not None and parsed_turn >= 0:
+            hl = parsed_turn
         elif pt.get('x') is not None:
             x = pt['x']
             if 0 <= x < len(results):
