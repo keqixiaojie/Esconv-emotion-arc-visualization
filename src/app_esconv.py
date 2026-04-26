@@ -5,6 +5,8 @@ import dash
 from dash import html, dcc, Input, Output, State, ALL, ctx
 import plotly.graph_objects as go
 import numpy as np
+from plotly.subplots import make_subplots
+from scipy.stats import chi2, gaussian_kde
 from src.vad_extractor import VADExtractor, SentenceVADPredictor
 from src.emotion_smoothing import smooth_scores
 from src.esconv_loader import ESConvLoader
@@ -12,9 +14,11 @@ from src.esconv_loader import ESConvLoader
 LEXICON_PATH = "NRC-VAD-Lexicon-v2.1.txt"
 ESCONV_PATH = "ESConv-strategy.json"
 CACHE_DIR = "src/cache"
+SYNC_RANGE_DIR = os.path.join(CACHE_DIR, "sync_ranges")
 MARKERS_FILE = os.path.join(CACHE_DIR, "markers.json")
 AUTO_MARKERS_FILE = os.path.join(CACHE_DIR, "auto_markers.json")
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(SYNC_RANGE_DIR, exist_ok=True)
 
 vad_extractor = VADExtractor(LEXICON_PATH)
 esconv_loader = ESConvLoader(ESCONV_PATH)
@@ -36,10 +40,12 @@ DIFF_RELATION_COLORS = {'prev': '#FF7043', 'next': '#42A5F5'}
 DIM_COLORS = {'valence': 'crimson', 'arousal': 'darkorange', 'dominance': 'steelblue'}
 DIM_SHORT = {'valence': 'V', 'arousal': 'A', 'dominance': 'D'}
 RELATION_LABELS = {'prev': '上次supporter', 'next': '下次supporter'}
-TREND_LABELS = {'rise': '首次上升起点', 'fall': '首次下降起点'}
+TREND_LABELS = {'rise': '上升点', 'fall': '下降点'}
 SYNC_CONFIDENCE = 0.95
 SYNC_PLOT_MAX_POINTS = 2500
-AUTO_TREND_MIN_DELTA = 0.03
+SYNC_CACHE_VERSION = 2
+SYNC_ELLIPSOID_RESOLUTION = 22
+AUTO_TREND_SKIP_POINTS = 3
 SHOW_MODAL_STYLE = {
     'display': 'flex', 'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%',
     'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': 9999,
@@ -380,13 +386,6 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
         'strategy_next': strategy_dots['next'],
     }
 
-def _auto_trend_threshold(values):
-    values = np.asarray(values, dtype=float)
-    if len(values) < 2:
-        return AUTO_TREND_MIN_DELTA
-    diffs = np.diff(values)
-    return max(AUTO_TREND_MIN_DELTA, float(np.nanstd(diffs)) * 0.25)
-
 def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
     if not relation_data or len(relation_data.get('y', [])) < 2:
         return []
@@ -394,31 +393,32 @@ def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
     xs = relation_data['x']
     ys = relation_data['y']
     turns = relation_data['turns']
-    diffs = np.diff(np.asarray(ys, dtype=float))
-    threshold = _auto_trend_threshold(ys)
+    ys_arr = np.asarray(ys, dtype=float)
     markers = []
-    for trend, matcher in [('rise', lambda d: d >= threshold), ('fall', lambda d: d <= -threshold)]:
-        start_idx = next((i for i, d in enumerate(diffs) if matcher(d)), None)
-        if start_idx is None:
-            continue
-        strategy_summary = relation_data['strategy_summary'][start_idx] if start_idx < len(relation_data['strategy_summary']) else ''
-        default_label = f"{DIM_SHORT[dim]} {TREND_LABELS[trend]}"
-        if strategy_summary:
-            default_label += f" | {RELATION_LABELS[relation]}: {strategy_summary}"
-        marker_id = f"{relation}:{dim}:{trend}"
-        label = labels.get(marker_id) or default_label
-        markers.append({
-            'marker_id': marker_id,
-            'relation': relation,
-            'dim': dim,
-            'trend': trend,
-            'x': xs[start_idx],
-            'y': ys[start_idx],
-            'turn': turns[start_idx],
-            'label': label,
-            'default_label': default_label,
-            'slope': float(diffs[start_idx]),
-        })
+    for trend, matcher in [('rise', lambda cur, prev: cur > prev), ('fall', lambda cur, prev: cur < prev)]:
+        for marker_idx in range(AUTO_TREND_SKIP_POINTS + 1, len(ys_arr)):
+            if not matcher(ys_arr[marker_idx], ys_arr[marker_idx - 1]):
+                continue
+            strategy_summary = (
+                relation_data['strategy_summary'][marker_idx]
+                if marker_idx < len(relation_data['strategy_summary']) else '')
+            default_label = f"{DIM_SHORT[dim]} {TREND_LABELS[trend]}"
+            if strategy_summary:
+                default_label += f" | {RELATION_LABELS[relation]}: {strategy_summary}"
+            marker_id = f"{relation}:{dim}:{trend}:{marker_idx}"
+            label = labels.get(marker_id) or default_label
+            markers.append({
+                'marker_id': marker_id,
+                'relation': relation,
+                'dim': dim,
+                'trend': trend,
+                'x': xs[marker_idx],
+                'y': ys[marker_idx],
+                'turn': turns[marker_idx],
+                'label': label,
+                'default_label': default_label,
+                'slope': float(ys_arr[marker_idx] - ys_arr[marker_idx - 1]),
+            })
     return markers
 
 def _parse_turn_from_customdata(customdata):
@@ -436,31 +436,156 @@ def _sample_points(points, max_points=SYNC_PLOT_MAX_POINTS):
     idx = np.linspace(0, len(points) - 1, max_points).astype(int)
     return points[idx]
 
-def _build_sync_box(low, high):
-    x0, y0, z0 = low
-    x1, y1, z1 = high
-    edges = [
-        ((x0, y0, z0), (x1, y0, z0)), ((x0, y1, z0), (x1, y1, z0)),
-        ((x0, y0, z1), (x1, y0, z1)), ((x0, y1, z1), (x1, y1, z1)),
-        ((x0, y0, z0), (x0, y1, z0)), ((x1, y0, z0), (x1, y1, z0)),
-        ((x0, y0, z1), (x0, y1, z1)), ((x1, y0, z1), (x1, y1, z1)),
-        ((x0, y0, z0), (x0, y0, z1)), ((x1, y0, z0), (x1, y0, z1)),
-        ((x0, y1, z0), (x0, y1, z1)), ((x1, y1, z0), (x1, y1, z1)),
+def _sync_cache_key(tail_ratio, ws, smooth_mode, granularity):
+    pct = int(round(float(tail_ratio) * 100))
+    return f"v{SYNC_CACHE_VERSION}_tail{pct}_ws{int(ws)}_{smooth_mode}_{granularity}"
+
+def _sync_cache_path(tail_ratio, ws, smooth_mode, granularity):
+    return os.path.join(SYNC_RANGE_DIR, f"{_sync_cache_key(tail_ratio, ws, smooth_mode, granularity)}.json")
+
+def _restore_sync_dataset(data):
+    restored = dict(data)
+    for key in ['sample_points', 'mean', 'cov', 'low', 'high']:
+        if key in restored and restored[key] is not None:
+            restored[key] = np.asarray(restored[key], dtype=float)
+    return restored
+
+def _load_sync_dataset_from_disk(tail_ratio, ws, smooth_mode, granularity):
+    cache_path = _sync_cache_path(tail_ratio, ws, smooth_mode, granularity)
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'r', encoding='utf-8') as f:
+        return _restore_sync_dataset(json.load(f))
+
+def _save_sync_dataset_to_disk(tail_ratio, ws, smooth_mode, granularity, result):
+    cache_path = _sync_cache_path(tail_ratio, ws, smooth_mode, granularity)
+    serializable = {}
+    for key, value in result.items():
+        if isinstance(value, np.ndarray):
+            serializable[key] = value.tolist()
+        else:
+            serializable[key] = value
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+def _build_gaussian_ellipsoid(mean, cov, chi2_threshold):
+    cov = np.asarray(cov, dtype=float)
+    mean = np.asarray(mean, dtype=float)
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, 1e-8)
+    radii = np.sqrt(vals * chi2_threshold)
+
+    u = np.linspace(0.0, 2.0 * np.pi, SYNC_ELLIPSOID_RESOLUTION)
+    v = np.linspace(0.0, np.pi, SYNC_ELLIPSOID_RESOLUTION)
+    xs = np.outer(np.cos(u), np.sin(v))
+    ys = np.outer(np.sin(u), np.sin(v))
+    zs = np.outer(np.ones_like(u), np.cos(v))
+    sphere = np.stack([xs, ys, zs], axis=-1)
+    transform = vecs @ np.diag(radii)
+    ellipsoid = np.einsum('...i,ij->...j', sphere, transform.T) + mean
+    return go.Surface(
+        x=ellipsoid[:, :, 0], y=ellipsoid[:, :, 1], z=ellipsoid[:, :, 2],
+        name=f'{int(SYNC_CONFIDENCE * 100)}% 高斯椭球',
+        opacity=0.18, showscale=False,
+        colorscale=[[0.0, '#66BB6A'], [1.0, '#2E7D32']],
+        hoverinfo='skip')
+
+def _mahalanobis_inside(points, mean, cov, chi2_threshold):
+    centered = np.asarray(points, dtype=float) - np.asarray(mean, dtype=float)
+    cov_inv = np.linalg.pinv(np.asarray(cov, dtype=float))
+    dist2 = np.einsum('...i,ij,...j->...', centered, cov_inv, centered)
+    return dist2 <= chi2_threshold, dist2
+
+def _build_sync_kde_figure(sample_points, current_points, inside, turns, cache, tail_pct):
+    dim_pairs = [
+        ('valence', 'arousal', 0, 1, 'ΔValence', 'ΔArousal'),
+        ('valence', 'dominance', 0, 2, 'ΔValence', 'ΔDominance'),
+        ('arousal', 'dominance', 1, 2, 'ΔArousal', 'ΔDominance'),
     ]
-    xs, ys, zs = [], [], []
-    for start, end in edges:
-        xs.extend([start[0], end[0], None])
-        ys.extend([start[1], end[1], None])
-        zs.extend([start[2], end[2], None])
-    return go.Scatter3d(
-        x=xs, y=ys, z=zs, mode='lines', name='同步范围',
-        line=dict(color='#2E7D32', width=5), hoverinfo='skip')
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=[f'{x_label} vs {y_label}' for _, _, _, _, x_label, y_label in dim_pairs],
+        horizontal_spacing=0.08)
+
+    sampled = np.asarray(sample_points, dtype=float)
+    current = np.asarray(current_points, dtype=float)
+    inside = np.asarray(inside, dtype=bool)
+    x_bounds = (-1.0, 1.0)
+    y_bounds = (-1.0, 1.0)
+
+    for col, (_, _, x_idx, y_idx, x_label, y_label) in enumerate(dim_pairs, start=1):
+        proj = sampled[:, [x_idx, y_idx]].T
+        xs = np.linspace(x_bounds[0], x_bounds[1], 55)
+        ys = np.linspace(y_bounds[0], y_bounds[1], 55)
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        density = None
+        try:
+            kde = gaussian_kde(proj)
+            density = kde(np.vstack([grid_x.ravel(), grid_y.ravel()])).reshape(grid_x.shape)
+        except Exception:
+            density = None
+
+        if density is not None:
+            fig.add_trace(go.Contour(
+                x=xs, y=ys, z=density,
+                colorscale='YlGnBu',
+                contours=dict(showlabels=False),
+                line=dict(width=0.5),
+                opacity=0.85,
+                showscale=False,
+                hovertemplate=f'{x_label}: %{{x:.3f}}<br>{y_label}: %{{y:.3f}}<br>density=%{{z:.4f}}<extra></extra>',
+                name=f'{x_label}/{y_label} KDE'),
+                row=1, col=col)
+
+        fig.add_trace(go.Scatter(
+            x=current[:, x_idx], y=current[:, y_idx],
+            mode='lines', name='当前轨迹',
+            line=dict(color='#455A64', width=2),
+            hovertext=[
+                f"T[{turns[i]}] {x_label}={current[i, x_idx]:.3f}<br>{y_label}={current[i, y_idx]:.3f}"
+                for i in range(len(current))
+            ],
+            hoverinfo='text',
+            showlegend=(col == 1)),
+            row=1, col=col)
+        if np.any(inside):
+            fig.add_trace(go.Scatter(
+                x=current[inside, x_idx], y=current[inside, y_idx],
+                mode='markers', name='同步区内',
+                marker=dict(size=7, color='#2E7D32', opacity=0.95),
+                hovertext=[f"T[{turns[i]}] 同步区内" for i in np.where(inside)[0]],
+                hoverinfo='text',
+                showlegend=(col == 1)),
+                row=1, col=col)
+        if np.any(~inside):
+            fig.add_trace(go.Scatter(
+                x=current[~inside, x_idx], y=current[~inside, y_idx],
+                mode='markers', name='同步区外',
+                marker=dict(size=7, color='#C62828', opacity=0.9),
+                hovertext=[f"T[{turns[i]}] 同步区外" for i in np.where(~inside)[0]],
+                hoverinfo='text',
+                showlegend=(col == 1)),
+                row=1, col=col)
+
+        fig.update_xaxes(title_text=x_label, range=[-1, 1], row=1, col=col)
+        fig.update_yaxes(title_text=y_label, range=[-1, 1], row=1, col=col)
+
+    fig.update_layout(
+        title=f"#{cache.get('conv_id', '?')} | 同步范围 KDE 投影 | 尾段 {tail_pct}%",
+        height=420,
+        margin=dict(l=30, r=20, t=50, b=30),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+    return fig
 
 def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
     actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
     cache_key = (round(float(tail_ratio), 4), int(ws), actual_mode, granularity)
     if cache_key in SYNC_RANGE_MEMORY_CACHE:
         return SYNC_RANGE_MEMORY_CACHE[cache_key]
+    disk_cached = _load_sync_dataset_from_disk(tail_ratio, ws, actual_mode, granularity)
+    if disk_cached is not None:
+        SYNC_RANGE_MEMORY_CACHE[cache_key] = disk_cached
+        return disk_cached
 
     dataset_points = []
     used_conversations = 0
@@ -495,17 +620,26 @@ def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
 
     points = np.vstack(dataset_points)
     alpha = (1.0 - SYNC_CONFIDENCE) / 2.0
+    mean = np.mean(points, axis=0)
+    cov = np.cov(points, rowvar=False) if len(points) > 1 else np.eye(3) * 1e-6
+    cov = np.asarray(cov, dtype=float) + np.eye(3) * 1e-6
+    chi2_threshold = float(chi2.ppf(SYNC_CONFIDENCE, df=3))
     result = {
-        'points': points,
+        'sample_points': _sample_points(points),
+        'mean': mean,
+        'cov': cov,
+        'chi2_threshold': chi2_threshold,
         'low': np.quantile(points, alpha, axis=0),
         'high': np.quantile(points, 1.0 - alpha, axis=0),
         'used_conversations': used_conversations,
+        'point_count': int(len(points)),
         'tail_ratio': tail_ratio,
         'confidence': SYNC_CONFIDENCE,
         'granularity': granularity,
         'smooth_mode': actual_mode,
     }
     SYNC_RANGE_MEMORY_CACHE[cache_key] = result
+    _save_sync_dataset_to_disk(tail_ratio, ws, actual_mode, granularity, result)
     return result
 
 def _compute_current_sync_points(cache, ws, smooth_mode):
@@ -571,7 +705,7 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.Label("窗口大小:", style={'fontWeight': 'bold'}),
-            dcc.Slider(id='window-slider', min=2, max=20, step=1, value=4,
+            dcc.Slider(id='window-slider', min=2, max=20, step=1, value=2,
                 marks={i: str(i) for i in range(2, 21, 2)},
                 tooltip={"placement": "bottom", "always_visible": True})
         ], style={'width': '55%', 'display': 'inline-block', 'verticalAlign': 'middle'}),
@@ -635,6 +769,7 @@ app.layout = html.Div([
         ], style={'padding': '8px 12px'}),
         dcc.Loading(type='circle', color='#666', children=[
             dcc.Graph(id='graph-sync-3d'),
+            dcc.Graph(id='graph-sync-kde'),
             html.Div(id='sync-info', style={
                 'padding': '6px 12px', 'fontSize': '12px', 'color': '#555',
                 'backgroundColor': '#f8f9fa', 'borderRadius': '6px', 'marginTop': '4px'})
@@ -1255,7 +1390,8 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
             x=[marker['x']], y=[marker['y']], mode='markers+text',
             text=[trend_text],
             textposition='top center' if marker['trend'] == 'rise' else 'bottom center',
-            marker=dict(size=12, color=marker_color, symbol=trend_symbol,
+            textfont=dict(size=11, color=marker_color),
+            marker=dict(size=14, color=marker_color, symbol=trend_symbol,
                         line=dict(width=1, color='white')),
             hovertext=[
                 f"T[{marker['turn']}] {marker['label']}<br>"
@@ -1346,6 +1482,7 @@ def update_graphs(ws, smooth_mode, cache, markers, mf):
 
 @app.callback(
     Output('graph-sync-3d', 'figure'),
+    Output('graph-sync-kde', 'figure'),
     Output('sync-info', 'children'),
     Input('sync-tail-slider', 'value'),
     Input('window-slider', 'value'),
@@ -1358,12 +1495,19 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
         title="同步范围三维分布",
         scene=dict(xaxis_title='ΔValence', yaxis_title='ΔArousal', zaxis_title='ΔDominance'),
         height=520, margin=dict(l=10, r=10, t=40, b=10))
+    empty_kde = go.Figure()
+    empty_kde.update_layout(
+        title="同步范围 KDE 投影",
+        height=420, margin=dict(l=30, r=20, t=50, b=30))
 
     if not cache or cache.get('speaker') != 'seeker':
         empty.add_annotation(
             text="同步范围当前按 seeker − 上次supporter 计算，请切换到 Seeker 视角。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, "当前仅在 Seeker 视角下计算同步范围和同步率。"
+        empty_kde.add_annotation(
+            text="切换到 Seeker 视角后显示 KDE 投影。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, empty_kde, "当前仅在 Seeker 视角下计算同步范围和同步率。"
 
     tail_ratio = (tail_pct or 25) / 100.0
     dataset = _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity)
@@ -1372,23 +1516,29 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
         empty.add_annotation(
             text="当前参数下没有足够的差值点可用于同步范围统计。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, "差值点不足，无法计算同步范围。"
+        empty_kde.add_annotation(
+            text="当前参数下没有足够的差值点可用于 KDE 投影。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, empty_kde, "差值点不足，无法计算同步范围。"
 
     low = np.asarray(dataset['low'], dtype=float)
     high = np.asarray(dataset['high'], dtype=float)
+    mean = np.asarray(dataset['mean'], dtype=float)
+    cov = np.asarray(dataset['cov'], dtype=float)
+    chi2_threshold = float(dataset['chi2_threshold'])
     points = current['points']
     turns = current['turns']
-    inside = np.all((points >= low) & (points <= high), axis=1)
+    inside, dist2 = _mahalanobis_inside(points, mean, cov, chi2_threshold)
     sync_rate = float(np.mean(inside)) if len(points) else 0.0
 
-    sampled = _sample_points(dataset['points'])
+    sampled = np.asarray(dataset['sample_points'], dtype=float)
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
         x=sampled[:, 0], y=sampled[:, 1], z=sampled[:, 2],
         mode='markers', name='全数据尾段分布',
         marker=dict(size=3, color='rgba(120,120,120,0.30)'),
         hoverinfo='skip'))
-    fig.add_trace(_build_sync_box(low, high))
+    fig.add_trace(_build_gaussian_ellipsoid(mean, cov, chi2_threshold))
     fig.add_trace(go.Scatter3d(
         x=points[:, 0], y=points[:, 1], z=points[:, 2],
         mode='lines', name='当前对话轨迹',
@@ -1404,7 +1554,7 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
             mode='markers', name='同步区内',
             marker=dict(size=6, color='#2E7D32', opacity=0.95),
             hovertext=[
-                f"T[{turns[i]}] 在同步范围内"
+                f"T[{turns[i]}] 在同步范围内<br>Mahalanobis^2={dist2[i]:.3f}"
                 for i in np.where(inside)[0]
             ],
             hoverinfo='text'))
@@ -1414,7 +1564,7 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
             mode='markers', name='同步区外',
             marker=dict(size=6, color='#C62828', opacity=0.9),
             hovertext=[
-                f"T[{turns[i]}] 在同步范围外"
+                f"T[{turns[i]}] 在同步范围外<br>Mahalanobis^2={dist2[i]:.3f}"
                 for i in np.where(~inside)[0]
             ],
             hoverinfo='text'))
@@ -1436,21 +1586,24 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
         height=520, margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
 
+    kde_fig = _build_sync_kde_figure(sampled, points, inside, turns, cache, tail_pct)
+
     info = html.Div([
         html.Span(
             f"同步率: {sync_rate:.1%}（{int(np.sum(inside))}/{len(points)} 个有效差值时刻）",
             style={'marginRight': '18px', 'fontWeight': 'bold', 'color': '#2E7D32'}),
         html.Span(
-            f"同步范围: V[{low[0]:.3f}, {high[0]:.3f}] / "
-            f"A[{low[1]:.3f}, {high[1]:.3f}] / "
-            f"D[{low[2]:.3f}, {high[2]:.3f}]",
+            f"正态近似中心: μ=({mean[0]:.3f}, {mean[1]:.3f}, {mean[2]:.3f})",
             style={'marginRight': '18px'}),
         html.Span(
             f"全数据统计: {dataset['used_conversations']} 个对话，尾段 {tail_pct}% ，"
-            f"{int(dataset['confidence'] * 100)}% 中心区间",
+            f"{int(dataset['confidence'] * 100)}% 高斯椭球；"
+            f"外围分位参考 V[{low[0]:.3f}, {high[0]:.3f}] "
+            f"A[{low[1]:.3f}, {high[1]:.3f}] "
+            f"D[{low[2]:.3f}, {high[2]:.3f}]",
             style={'color': '#666'})
     ])
-    return fig, info
+    return fig, kde_fig, info
 
 
 @app.callback(
@@ -1458,21 +1611,15 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
     Input('graph-valence', 'hoverData'),
     Input('graph-arousal', 'hoverData'),
     Input('graph-dominance', 'hoverData'),
-    Input('graph-diff-valence', 'hoverData'),
-    Input('graph-diff-arousal', 'hoverData'),
-    Input('graph-diff-dominance', 'hoverData'),
     Input('vad-cache-store', 'data'),
     Input('markers-store', 'data'))
-def on_hover_dialog(hoverV, hoverA, hoverD, hoverDV, hoverDA, hoverDD, cache, markers):
+def on_hover_dialog(hoverV, hoverA, hoverD, cache, markers):
     hover_map = {
         'graph-valence': hoverV,
         'graph-arousal': hoverA,
         'graph-dominance': hoverD,
-        'graph-diff-valence': hoverDV,
-        'graph-diff-arousal': hoverDA,
-        'graph-diff-dominance': hoverDD,
     }
-    hoverData = hover_map.get(ctx.triggered_id) or hoverV or hoverA or hoverD or hoverDV or hoverDA or hoverDD
+    hoverData = hover_map.get(ctx.triggered_id) or hoverV or hoverA or hoverD
     if not cache or not cache.get('dialog'): return []
     dialog = cache['dialog']; results = cache.get('results', [])
     markers = markers or []; mm = {m['turn']: m for m in markers}
