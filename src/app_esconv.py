@@ -310,6 +310,7 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
 
     utterances = cache.get('utterances', [])
     bg_utterances = cache.get('bg_utterances', [])
+    results = cache.get('results', [])
     if not utterances or not bg_utterances:
         return None
 
@@ -319,6 +320,7 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
 
     is_sent = (cache.get('granularity') == 'sentence')
     xmid, xbg, turn_to_x = _build_turn_x_helpers(cache.get('results', []), utterances, is_sent)
+    seeker_raw_scores = _utterance_scores_from_results(results, utterances, dim, is_sent)
     seeker_turns = [u['turn_index'] for u in utterances]
     supp_blocks = _build_supporter_blocks(bg_utterances, seeker_turns)
 
@@ -339,6 +341,12 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
         'next': defaultdict(lambda: {'x': [], 'y': [], 'hover': [], 'turns': []}),
     }
     seeker_curve = {'x': [], 'y': [], 'turns': []}
+    for utt_idx, utt in enumerate(utterances):
+        if utt_idx >= len(seeker_raw_scores):
+            break
+        seeker_curve['x'].append(xbg(utt_idx))
+        seeker_curve['y'].append(float(seeker_raw_scores[utt_idx]))
+        seeker_curve['turns'].append(utt['turn_index'])
 
     for j, sv in enumerate(seeker_smooth):
         utt_idx = j + valid_start
@@ -348,9 +356,6 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
         prev_blk = nearest_prev_block(seeker_turn)
         next_blk = nearest_next_block(seeker_turn)
         xm = xmid(utt_idx)
-        seeker_curve['x'].append(xbg(utt_idx))
-        seeker_curve['y'].append(float(sv))
-        seeker_curve['turns'].append(seeker_turn)
 
         prev_turn = seeker_turns[utt_idx - 1] if utt_idx > 0 else -1
         next_turn = seeker_turns[utt_idx + 1] if utt_idx < len(seeker_turns) - 1 else float('inf')
