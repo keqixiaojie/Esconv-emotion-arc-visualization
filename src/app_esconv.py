@@ -272,7 +272,10 @@ def _build_turn_x_helpers(results, utterances, is_sent):
         lo, hi = turn_word_ranges.get(turn_idx, (i, i))
         return float((lo + hi) / 2.0)
 
-    def xbg(i): return xmid(i)
+    def xbg(i):
+        turn_idx = utterances[i]['turn_index']
+        lo, _ = turn_word_ranges.get(turn_idx, (i, i))
+        return float(lo)
 
     return xmid, xbg, {u['turn_index']: xmid(i) for i, u in enumerate(utterances)}
 
@@ -1422,7 +1425,7 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
     bg_series = diff_series['seeker_curve']
     is_sent = diff_series['is_sent']
     fig = go.Figure()
-    bg_shape = 'hv' if is_sent else 'linear'
+    bg_shape = 'hv'
     if bg_series['x']:
         fig.add_trace(go.Scatter(
             x=bg_series['x'], y=bg_series['y'], mode='lines', name=f'{dim.capitalize()} (seeker)',
