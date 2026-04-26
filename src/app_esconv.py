@@ -46,6 +46,12 @@ SYNC_PLOT_MAX_POINTS = 2500
 SYNC_CACHE_VERSION = 2
 SYNC_ELLIPSOID_RESOLUTION = 22
 AUTO_TREND_SKIP_POINTS = 2
+SYNC_KDE_GRID_SIZE = 55
+SYNC_KDE_PAIRS = [
+    ('valence', 'arousal', 0, 1, 'ΔValence', 'ΔArousal'),
+    ('valence', 'dominance', 0, 2, 'ΔValence', 'ΔDominance'),
+    ('arousal', 'dominance', 1, 2, 'ΔArousal', 'ΔDominance'),
+]
 SHOW_MODAL_STYLE = {
     'display': 'flex', 'position': 'fixed', 'top': 0, 'left': 0, 'width': '100%', 'height': '100%',
     'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': 9999,
@@ -462,11 +468,37 @@ def _sync_cache_key(tail_ratio, ws, smooth_mode, granularity):
 def _sync_cache_path(tail_ratio, ws, smooth_mode, granularity):
     return os.path.join(SYNC_RANGE_DIR, f"{_sync_cache_key(tail_ratio, ws, smooth_mode, granularity)}.json")
 
+def _serialize_sync_dataset(result):
+    serializable = {}
+    for key, value in result.items():
+        if isinstance(value, np.ndarray):
+            serializable[key] = value.tolist()
+        elif key == 'kde_data' and isinstance(value, dict):
+            serializable[key] = {}
+            for pair_key, pair_data in value.items():
+                serializable[key][pair_key] = {}
+                for sub_key, sub_value in pair_data.items():
+                    serializable[key][pair_key][sub_key] = (
+                        sub_value.tolist() if isinstance(sub_value, np.ndarray) else sub_value)
+        else:
+            serializable[key] = value
+    return serializable
+
 def _restore_sync_dataset(data):
     restored = dict(data)
     for key in ['sample_points', 'mean', 'cov', 'low', 'high']:
         if key in restored and restored[key] is not None:
             restored[key] = np.asarray(restored[key], dtype=float)
+    if 'kde_data' in restored and isinstance(restored['kde_data'], dict):
+        restored_kde = {}
+        for pair_key, pair_data in restored['kde_data'].items():
+            restored_kde[pair_key] = {}
+            for sub_key, sub_value in pair_data.items():
+                if sub_key in {'xs', 'ys', 'z'} and sub_value is not None:
+                    restored_kde[pair_key][sub_key] = np.asarray(sub_value, dtype=float)
+                else:
+                    restored_kde[pair_key][sub_key] = sub_value
+        restored['kde_data'] = restored_kde
     return restored
 
 def _load_sync_dataset_from_disk(tail_ratio, ws, smooth_mode, granularity):
@@ -478,12 +510,7 @@ def _load_sync_dataset_from_disk(tail_ratio, ws, smooth_mode, granularity):
 
 def _save_sync_dataset_to_disk(tail_ratio, ws, smooth_mode, granularity, result):
     cache_path = _sync_cache_path(tail_ratio, ws, smooth_mode, granularity)
-    serializable = {}
-    for key, value in result.items():
-        if isinstance(value, np.ndarray):
-            serializable[key] = value.tolist()
-        else:
-            serializable[key] = value
+    serializable = _serialize_sync_dataset(result)
     with open(cache_path, 'w', encoding='utf-8') as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
 
@@ -515,36 +542,48 @@ def _mahalanobis_inside(points, mean, cov, chi2_threshold):
     dist2 = np.einsum('...i,ij,...j->...', centered, cov_inv, centered)
     return dist2 <= chi2_threshold, dist2
 
-def _build_sync_kde_figure(sample_points, current_points, inside, turns, cache, tail_pct):
-    dim_pairs = [
-        ('valence', 'arousal', 0, 1, 'ΔValence', 'ΔArousal'),
-        ('valence', 'dominance', 0, 2, 'ΔValence', 'ΔDominance'),
-        ('arousal', 'dominance', 1, 2, 'ΔArousal', 'ΔDominance'),
-    ]
-    fig = make_subplots(
-        rows=1, cols=3,
-        subplot_titles=[f'{x_label} vs {y_label}' for _, _, _, _, x_label, y_label in dim_pairs],
-        horizontal_spacing=0.08)
-
+def _build_sync_kde_cache(sample_points):
     sampled = np.asarray(sample_points, dtype=float)
-    current = np.asarray(current_points, dtype=float)
-    inside = np.asarray(inside, dtype=bool)
-    x_bounds = (-1.0, 1.0)
-    y_bounds = (-1.0, 1.0)
-
-    for col, (_, _, x_idx, y_idx, x_label, y_label) in enumerate(dim_pairs, start=1):
-        proj = sampled[:, [x_idx, y_idx]].T
-        xs = np.linspace(x_bounds[0], x_bounds[1], 55)
-        ys = np.linspace(y_bounds[0], y_bounds[1], 55)
+    kde_data = {}
+    for key_x, key_y, x_idx, y_idx, x_label, y_label in SYNC_KDE_PAIRS:
+        pair_key = f'{key_x}_{key_y}'
+        xs = np.linspace(-1.0, 1.0, SYNC_KDE_GRID_SIZE)
+        ys = np.linspace(-1.0, 1.0, SYNC_KDE_GRID_SIZE)
         grid_x, grid_y = np.meshgrid(xs, ys)
         density = None
         try:
+            proj = sampled[:, [x_idx, y_idx]].T
             kde = gaussian_kde(proj)
             density = kde(np.vstack([grid_x.ravel(), grid_y.ravel()])).reshape(grid_x.shape)
         except Exception:
             density = None
+        kde_data[pair_key] = {
+            'xs': xs,
+            'ys': ys,
+            'z': density,
+            'x_idx': x_idx,
+            'y_idx': y_idx,
+            'x_label': x_label,
+            'y_label': y_label,
+        }
+    return kde_data
 
-        if density is not None:
+def _build_sync_kde_figure(kde_data, current_points, inside, turns, cache, tail_pct):
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=[f'{x_label} vs {y_label}' for _, _, _, _, x_label, y_label in SYNC_KDE_PAIRS],
+        horizontal_spacing=0.08)
+
+    current = np.asarray(current_points, dtype=float)
+    inside = np.asarray(inside, dtype=bool)
+
+    for col, (key_x, key_y, x_idx, y_idx, x_label, y_label) in enumerate(SYNC_KDE_PAIRS, start=1):
+        pair_key = f'{key_x}_{key_y}'
+        pair = kde_data.get(pair_key, {}) if isinstance(kde_data, dict) else {}
+        density = pair.get('z')
+        xs = pair.get('xs')
+        ys = pair.get('ys')
+        if density is not None and xs is not None and ys is not None:
             fig.add_trace(go.Contour(
                 x=xs, y=ys, z=density,
                 colorscale='YlGnBu',
@@ -596,7 +635,7 @@ def _build_sync_kde_figure(sample_points, current_points, inside, turns, cache, 
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
     return fig
 
-def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
+def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity, compute_if_missing=True):
     actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
     cache_key = (round(float(tail_ratio), 4), int(ws), actual_mode, granularity)
     if cache_key in SYNC_RANGE_MEMORY_CACHE:
@@ -605,6 +644,8 @@ def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
     if disk_cached is not None:
         SYNC_RANGE_MEMORY_CACHE[cache_key] = disk_cached
         return disk_cached
+    if not compute_if_missing:
+        return None
 
     dataset_points = []
     used_conversations = 0
@@ -657,9 +698,13 @@ def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity):
         'granularity': granularity,
         'smooth_mode': actual_mode,
     }
+    result['kde_data'] = _build_sync_kde_cache(result['sample_points'])
     SYNC_RANGE_MEMORY_CACHE[cache_key] = result
     _save_sync_dataset_to_disk(tail_ratio, ws, actual_mode, granularity, result)
     return result
+
+def _load_sync_dataset_cached_only(tail_ratio, ws, smooth_mode, granularity):
+    return _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity, compute_if_missing=False)
 
 def _compute_current_sync_points(cache, ws, smooth_mode):
     if not cache or cache.get('speaker') != 'seeker':
@@ -797,6 +842,7 @@ app.layout = html.Div([
     # 标签编辑弹窗
     dcc.Store(id='editing-target', data=None),
     dcc.Store(id='auto-marker-revision', data=0),
+    dcc.Store(id='sync-dataset-store', data=None),
     html.Div(id='label-modal-container', children=[
         html.Div(id='label-modal', children=[
             html.Div([
@@ -1500,15 +1546,44 @@ def update_graphs(ws, smooth_mode, cache, markers, mf):
 
 
 @app.callback(
-    Output('graph-sync-3d', 'figure'),
-    Output('graph-sync-kde', 'figure'),
-    Output('sync-info', 'children'),
+    Output('sync-dataset-store', 'data'),
     Input('sync-tail-slider', 'value'),
     Input('window-slider', 'value'),
     Input('smooth-mode-radio', 'value'),
-    Input('granularity-radio', 'value'),
+    Input('granularity-radio', 'value'))
+def load_sync_dataset_store(tail_pct, ws, smooth_mode, granularity):
+    tail_pct = tail_pct or 25
+    tail_ratio = tail_pct / 100.0
+    dataset = _load_sync_dataset_cached_only(tail_ratio, ws, smooth_mode, granularity)
+    actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
+    if dataset is None:
+        return {
+            'available': False,
+            'tail_pct': tail_pct,
+            'window_size': ws,
+            'smooth_mode': actual_mode,
+            'granularity': granularity,
+            'cache_key': _sync_cache_key(tail_ratio, ws, actual_mode, granularity),
+        }
+    serializable = _serialize_sync_dataset(dataset)
+    serializable.update({
+        'available': True,
+        'tail_pct': tail_pct,
+        'window_size': ws,
+        'cache_key': _sync_cache_key(tail_ratio, ws, actual_mode, granularity),
+    })
+    return serializable
+
+
+@app.callback(
+    Output('graph-sync-3d', 'figure'),
+    Output('graph-sync-kde', 'figure'),
+    Output('sync-info', 'children'),
+    Input('sync-dataset-store', 'data'),
+    Input('window-slider', 'value'),
+    Input('smooth-mode-radio', 'value'),
     Input('vad-cache-store', 'data'))
-def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
+def update_sync_view(sync_dataset_data, ws, smooth_mode, cache):
     empty = go.Figure()
     empty.update_layout(
         title="同步范围三维分布",
@@ -1528,8 +1603,17 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
         return empty, empty_kde, "当前仅在 Seeker 视角下计算同步范围和同步率。"
 
-    tail_ratio = (tail_pct or 25) / 100.0
-    dataset = _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity)
+    if not sync_dataset_data or not sync_dataset_data.get('available'):
+        cache_key = sync_dataset_data.get('cache_key') if isinstance(sync_dataset_data, dict) else 'unknown'
+        empty.add_annotation(
+            text="未找到同步范围缓存，请先运行预计算脚本。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        empty_kde.add_annotation(
+            text="未找到 KDE 缓存，请先运行预计算脚本。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
+
+    dataset = _restore_sync_dataset(sync_dataset_data)
     current = _compute_current_sync_points(cache, ws, smooth_mode)
     if dataset is None or current is None:
         empty.add_annotation(
@@ -1551,6 +1635,7 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
     sync_rate = float(np.mean(inside)) if len(points) else 0.0
 
     sampled = np.asarray(dataset['sample_points'], dtype=float)
+    tail_pct = dataset.get('tail_pct', 25)
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
         x=sampled[:, 0], y=sampled[:, 1], z=sampled[:, 2],
@@ -1605,7 +1690,7 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
         height=520, margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
 
-    kde_fig = _build_sync_kde_figure(sampled, points, inside, turns, cache, tail_pct)
+    kde_fig = _build_sync_kde_figure(dataset.get('kde_data', {}), points, inside, turns, cache, tail_pct)
 
     info = html.Div([
         html.Span(
@@ -1619,7 +1704,8 @@ def update_sync_view(tail_pct, ws, smooth_mode, granularity, cache):
             f"{int(dataset['confidence'] * 100)}% 高斯椭球；"
             f"外围分位参考 V[{low[0]:.3f}, {high[0]:.3f}] "
             f"A[{low[1]:.3f}, {high[1]:.3f}] "
-            f"D[{low[2]:.3f}, {high[2]:.3f}]",
+            f"D[{low[2]:.3f}, {high[2]:.3f}]；"
+            f"缓存键 {dataset.get('cache_key', 'n/a')}",
             style={'color': '#666'})
     ])
     return fig, kde_fig, info
