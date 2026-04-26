@@ -43,9 +43,10 @@ RELATION_LABELS = {'prev': '上次supporter', 'next': '下次supporter'}
 TREND_LABELS = {'rise': '升段起点', 'fall': '降段起点'}
 SYNC_CONFIDENCE = 0.95
 SYNC_PLOT_MAX_POINTS = 2500
-SYNC_CACHE_VERSION = 2
+SYNC_CACHE_VERSION = 3
 SYNC_ELLIPSOID_RESOLUTION = 22
 AUTO_TREND_SKIP_POINTS = 2
+AUTO_TREND_MIN_DELTA = 0.1
 SYNC_KDE_GRID_SIZE = 55
 SYNC_KDE_PAIRS = [
     ('valence', 'arousal', 0, 1, 'ΔValence', 'ΔArousal'),
@@ -402,17 +403,20 @@ def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
     ys_arr = np.asarray(ys, dtype=float)
     markers = []
     start_idx = AUTO_TREND_SKIP_POINTS + 1
+    end_exclusive = max(start_idx, len(ys_arr) - 2)
     prev_dir = 0
     for idx in range(1, min(start_idx, len(ys_arr))):
         diff = ys_arr[idx] - ys_arr[idx - 1]
+        if abs(diff) < AUTO_TREND_MIN_DELTA:
+            continue
         if diff > 0:
             prev_dir = 1
         elif diff < 0:
             prev_dir = -1
 
-    for marker_idx in range(start_idx, len(ys_arr)):
+    for marker_idx in range(start_idx, end_exclusive):
         diff = ys_arr[marker_idx] - ys_arr[marker_idx - 1]
-        if diff == 0:
+        if abs(diff) < AUTO_TREND_MIN_DELTA:
             continue
         cur_dir = 1 if diff > 0 else -1
         if prev_dir == 0:
@@ -663,8 +667,11 @@ def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity, compute_if_m
         size = min(sizes)
         if size <= 0:
             continue
-        tail_count = max(1, int(np.ceil(size * tail_ratio)))
-        start_idx = max(0, size - tail_count)
+        if tail_ratio <= 0:
+            start_idx = 0
+        else:
+            tail_count = max(1, int(np.ceil(size * tail_ratio)))
+            start_idx = max(0, size - tail_count)
         stacked = np.column_stack([
             np.asarray(series['valence']['prev']['y'][:size], dtype=float)[start_idx:],
             np.asarray(series['arousal']['prev']['y'][:size], dtype=float)[start_idx:],
@@ -823,12 +830,12 @@ app.layout = html.Div([
             html.Div([
                 html.Label("尾段范围:", style={'fontWeight': 'bold'}),
                 dcc.Slider(
-                    id='sync-tail-slider', min=10, max=50, step=5, value=25,
-                    marks={i: f"{i}%" for i in range(10, 55, 10)},
+                    id='sync-tail-slider', min=0, max=50, step=5, value=25,
+                    marks={i: f"{i}%" for i in range(0, 55, 10)},
                     tooltip={"placement": "bottom", "always_visible": True})
             ], style={'width': '55%', 'display': 'inline-block', 'verticalAlign': 'middle'}),
             html.Div(
-                "按状态差值图横坐标的最后 X% 截取，再汇总全数据分布。",
+                "按状态差值图横坐标的最后 X% 截取；0% 表示不截尾，使用整段差值序列。",
                 style={'display': 'inline-block', 'marginLeft': '30px', 'fontSize': '12px', 'color': '#666'})
         ], style={'padding': '8px 12px'}),
         dcc.Loading(type='circle', color='#666', children=[
@@ -1580,10 +1587,12 @@ def load_sync_dataset_store(tail_pct, ws, smooth_mode, granularity):
     Output('graph-sync-kde', 'figure'),
     Output('sync-info', 'children'),
     Input('sync-dataset-store', 'data'),
+    Input('sync-tail-slider', 'value'),
     Input('window-slider', 'value'),
     Input('smooth-mode-radio', 'value'),
+    Input('granularity-radio', 'value'),
     Input('vad-cache-store', 'data'))
-def update_sync_view(sync_dataset_data, ws, smooth_mode, cache):
+def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, cache):
     empty = go.Figure()
     empty.update_layout(
         title="同步范围三维分布",
@@ -1603,17 +1612,27 @@ def update_sync_view(sync_dataset_data, ws, smooth_mode, cache):
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
         return empty, empty_kde, "当前仅在 Seeker 视角下计算同步范围和同步率。"
 
-    if not sync_dataset_data or not sync_dataset_data.get('available'):
-        cache_key = sync_dataset_data.get('cache_key') if isinstance(sync_dataset_data, dict) else 'unknown'
-        empty.add_annotation(
-            text="未找到同步范围缓存，请先运行预计算脚本。",
-            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        empty_kde.add_annotation(
-            text="未找到 KDE 缓存，请先运行预计算脚本。",
-            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
+    tail_pct = tail_pct or 25
+    tail_ratio = tail_pct / 100.0
+    actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
+    cache_key = _sync_cache_key(tail_ratio, ws, actual_mode, granularity)
 
-    dataset = _restore_sync_dataset(sync_dataset_data)
+    dataset = None
+    if sync_dataset_data and sync_dataset_data.get('available'):
+        dataset = _restore_sync_dataset(sync_dataset_data)
+    if dataset is None:
+        dataset = _load_sync_dataset_cached_only(tail_ratio, ws, actual_mode, granularity)
+
+    if not sync_dataset_data or not sync_dataset_data.get('available'):
+        if dataset is None:
+            empty.add_annotation(
+                text="未找到同步范围缓存，请先运行预计算脚本。",
+                x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+            empty_kde.add_annotation(
+                text="未找到 KDE 缓存，请先运行预计算脚本。",
+                x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+            return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
+
     current = _compute_current_sync_points(cache, ws, smooth_mode)
     if dataset is None or current is None:
         empty.add_annotation(

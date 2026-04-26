@@ -24,8 +24,8 @@ def main():
         description="Precompute synchrony-range caches for ESConv visualization.")
     parser.add_argument(
         "--tail-pcts",
-        default="5,15,25,35",
-        help="Comma-separated tail percentages to precompute. Default: 5,15,25,35")
+        default="0,5,15,25,35",
+        help="Comma-separated tail percentages to precompute. Default: 0,5,15,25,35")
     parser.add_argument(
         "--window-sizes",
         default="2",
