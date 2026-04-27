@@ -1,0 +1,1383 @@
+{
+  "conv_id": 428,
+  "speaker": "seeker",
+  "granularity": "sentence",
+  "smooth_mode": "context",
+  "window_size": 2,
+  "dims": {
+    "valence": {
+      "is_sent": true,
+      "turn_to_x": {
+        "0": 2.0,
+        "2": 5.5,
+        "4": 23.0,
+        "6": 41.5,
+        "8": 50.5,
+        "11": 77.5,
+        "13": 100.0,
+        "15": 107.5,
+        "17": 122.5
+      },
+      "seeker_curve": {
+        "x": [
+          0.0,
+          5.0,
+          7.0,
+          40.0,
+          44.0,
+          58.0,
+          98.0,
+          103.0,
+          113.0
+        ],
+        "y": [
+          0.18718576431274414,
+          -0.4725208282470703,
+          -0.5392954349517822,
+          0.020576834678649902,
+          0.16903901100158691,
+          -0.36678314208984375,
+          -0.02036571502685547,
+          -0.034224510192871094,
+          0.037909746170043945
+        ],
+        "turns": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ]
+      },
+      "prev": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5,
+          122.5
+        ],
+        "y": [
+          -0.7352676391601562,
+          -0.44599390029907227,
+          -0.4762263298034668,
+          0.09073758125305176,
+          -0.15947747230529785,
+          -0.12997639179229736,
+          -0.19679713249206543,
+          -0.07022857666015625
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ],
+        "hover": [
+          "T[2] ΔV=-0.735<br>上次supporter: Question<br>supporter段: T[1~1]",
+          "T[4] ΔV=-0.446<br>上次supporter: Question<br>supporter段: T[3~3]",
+          "T[6] ΔV=-0.476<br>上次supporter: Others<br>supporter段: T[5~5]",
+          "T[8] ΔV=0.091<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[11] ΔV=-0.159<br>上次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[13] ΔV=-0.130<br>上次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[15] ΔV=-0.197<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[17] ΔV=-0.070<br>上次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "next": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5
+        ],
+        "y": [
+          0.016507983207702637,
+          -0.6460884809494019,
+          -0.5367586612701416,
+          0.1123267412185669,
+          0.12648677825927734,
+          -0.49807870388031006,
+          -0.1538088321685791
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15
+        ],
+        "hover": [
+          "T[2] ΔV=0.017<br>下次supporter: Question<br>supporter段: T[3~3]",
+          "T[4] ΔV=-0.646<br>下次supporter: Others<br>supporter段: T[5~5]",
+          "T[6] ΔV=-0.537<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[8] ΔV=0.112<br>下次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[11] ΔV=0.126<br>下次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[13] ΔV=-0.498<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[15] ΔV=-0.154<br>下次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "strategy_prev": {
+        "Question": {
+          "x": [
+            4.5,
+            22.0,
+            75.5,
+            121.5
+          ],
+          "y": [
+            -0.7352676391601562,
+            -0.44599390029907227,
+            -0.15947747230529785,
+            -0.07022857666015625
+          ],
+          "hover": [
+            "T[2] | 上次supporter策略: Question",
+            "T[4] | 上次supporter策略: Question",
+            "T[11] | 上次supporter策略: Question",
+            "T[17] | 上次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            4,
+            11,
+            17
+          ]
+        },
+        "Others": {
+          "x": [
+            40.5
+          ],
+          "y": [
+            -0.4762263298034668
+          ],
+          "hover": [
+            "T[6] | 上次supporter策略: Others"
+          ],
+          "turns": [
+            6
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            49.5,
+            106.5
+          ],
+          "y": [
+            0.09073758125305176,
+            -0.19679713249206543
+          ],
+          "hover": [
+            "T[8] | 上次supporter策略: Affirmation and Reassurance",
+            "T[15] | 上次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            8,
+            15
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            76.5
+          ],
+          "y": [
+            -0.15947747230529785
+          ],
+          "hover": [
+            "T[11] | 上次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            11
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            99.0
+          ],
+          "y": [
+            -0.12997639179229736
+          ],
+          "hover": [
+            "T[13] | 上次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            13
+          ]
+        }
+      },
+      "strategy_next": {
+        "Question": {
+          "x": [
+            6.5,
+            52.5,
+            108.5
+          ],
+          "y": [
+            0.016507983207702637,
+            0.1123267412185669,
+            -0.1538088321685791
+          ],
+          "hover": [
+            "T[2] | 下次supporter策略: Question",
+            "T[8] | 下次supporter策略: Question",
+            "T[15] | 下次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            8,
+            15
+          ]
+        },
+        "Others": {
+          "x": [
+            24.0
+          ],
+          "y": [
+            -0.6460884809494019
+          ],
+          "hover": [
+            "T[4] | 下次supporter策略: Others"
+          ],
+          "turns": [
+            4
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            42.5,
+            101.0
+          ],
+          "y": [
+            -0.5367586612701416,
+            -0.49807870388031006
+          ],
+          "hover": [
+            "T[6] | 下次supporter策略: Affirmation and Reassurance",
+            "T[13] | 下次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            6,
+            13
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            51.5
+          ],
+          "y": [
+            0.1123267412185669
+          ],
+          "hover": [
+            "T[8] | 下次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            8
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            78.5
+          ],
+          "y": [
+            0.12648677825927734
+          ],
+          "hover": [
+            "T[11] | 下次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            11
+          ]
+        }
+      }
+    },
+    "arousal": {
+      "is_sent": true,
+      "turn_to_x": {
+        "0": 2.0,
+        "2": 5.5,
+        "4": 23.0,
+        "6": 41.5,
+        "8": 50.5,
+        "11": 77.5,
+        "13": 100.0,
+        "15": 107.5,
+        "17": 122.5
+      },
+      "seeker_curve": {
+        "x": [
+          0.0,
+          5.0,
+          7.0,
+          40.0,
+          44.0,
+          58.0,
+          98.0,
+          103.0,
+          113.0
+        ],
+        "y": [
+          0.03662991523742676,
+          0.1808105707168579,
+          0.01991260051727295,
+          -0.10706984996795654,
+          -0.00026869773864746094,
+          0.1909346580505371,
+          -0.06697750091552734,
+          -0.10554027557373047,
+          0.013553857803344727
+        ],
+        "turns": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ]
+      },
+      "prev": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5,
+          122.5
+        ],
+        "y": [
+          -0.21422314643859863,
+          0.12261855602264404,
+          -0.013361454010009766,
+          -0.21915388107299805,
+          0.19335627555847168,
+          0.1647409200668335,
+          -0.17744863033294678,
+          -0.14945447444915771
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ],
+        "hover": [
+          "T[2] ΔA=-0.214<br>上次supporter: Question<br>supporter段: T[1~1]",
+          "T[4] ΔA=0.123<br>上次supporter: Question<br>supporter段: T[3~3]",
+          "T[6] ΔA=-0.013<br>上次supporter: Others<br>supporter段: T[5~5]",
+          "T[8] ΔA=-0.219<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[11] ΔA=0.193<br>上次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[13] ΔA=0.165<br>上次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[15] ΔA=-0.177<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[17] ΔA=-0.149<br>上次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "next": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5
+        ],
+        "y": [
+          0.10208892822265625,
+          0.1207355260848999,
+          -0.22973084449768066,
+          -0.0024416446685791016,
+          0.19290876388549805,
+          0.10485279560089111,
+          -0.2382596731185913
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15
+        ],
+        "hover": [
+          "T[2] ΔA=0.102<br>下次supporter: Question<br>supporter段: T[3~3]",
+          "T[4] ΔA=0.121<br>下次supporter: Others<br>supporter段: T[5~5]",
+          "T[6] ΔA=-0.230<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[8] ΔA=-0.002<br>下次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[11] ΔA=0.193<br>下次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[13] ΔA=0.105<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[15] ΔA=-0.238<br>下次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "strategy_prev": {
+        "Question": {
+          "x": [
+            4.5,
+            22.0,
+            75.5,
+            121.5
+          ],
+          "y": [
+            -0.21422314643859863,
+            0.12261855602264404,
+            0.19335627555847168,
+            -0.14945447444915771
+          ],
+          "hover": [
+            "T[2] | 上次supporter策略: Question",
+            "T[4] | 上次supporter策略: Question",
+            "T[11] | 上次supporter策略: Question",
+            "T[17] | 上次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            4,
+            11,
+            17
+          ]
+        },
+        "Others": {
+          "x": [
+            40.5
+          ],
+          "y": [
+            -0.013361454010009766
+          ],
+          "hover": [
+            "T[6] | 上次supporter策略: Others"
+          ],
+          "turns": [
+            6
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            49.5,
+            106.5
+          ],
+          "y": [
+            -0.21915388107299805,
+            -0.17744863033294678
+          ],
+          "hover": [
+            "T[8] | 上次supporter策略: Affirmation and Reassurance",
+            "T[15] | 上次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            8,
+            15
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            76.5
+          ],
+          "y": [
+            0.19335627555847168
+          ],
+          "hover": [
+            "T[11] | 上次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            11
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            99.0
+          ],
+          "y": [
+            0.1647409200668335
+          ],
+          "hover": [
+            "T[13] | 上次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            13
+          ]
+        }
+      },
+      "strategy_next": {
+        "Question": {
+          "x": [
+            6.5,
+            52.5,
+            108.5
+          ],
+          "y": [
+            0.10208892822265625,
+            -0.0024416446685791016,
+            -0.2382596731185913
+          ],
+          "hover": [
+            "T[2] | 下次supporter策略: Question",
+            "T[8] | 下次supporter策略: Question",
+            "T[15] | 下次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            8,
+            15
+          ]
+        },
+        "Others": {
+          "x": [
+            24.0
+          ],
+          "y": [
+            0.1207355260848999
+          ],
+          "hover": [
+            "T[4] | 下次supporter策略: Others"
+          ],
+          "turns": [
+            4
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            42.5,
+            101.0
+          ],
+          "y": [
+            -0.22973084449768066,
+            0.10485279560089111
+          ],
+          "hover": [
+            "T[6] | 下次supporter策略: Affirmation and Reassurance",
+            "T[13] | 下次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            6,
+            13
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            51.5
+          ],
+          "y": [
+            -0.0024416446685791016
+          ],
+          "hover": [
+            "T[8] | 下次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            8
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            78.5
+          ],
+          "y": [
+            0.19290876388549805
+          ],
+          "hover": [
+            "T[11] | 下次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            11
+          ]
+        }
+      }
+    },
+    "dominance": {
+      "is_sent": true,
+      "turn_to_x": {
+        "0": 2.0,
+        "2": 5.5,
+        "4": 23.0,
+        "6": 41.5,
+        "8": 50.5,
+        "11": 77.5,
+        "13": 100.0,
+        "15": 107.5,
+        "17": 122.5
+      },
+      "seeker_curve": {
+        "x": [
+          0.0,
+          5.0,
+          7.0,
+          40.0,
+          44.0,
+          58.0,
+          98.0,
+          103.0,
+          113.0
+        ],
+        "y": [
+          -0.0002663135528564453,
+          -0.24415171146392822,
+          -0.3044619560241699,
+          0.05906343460083008,
+          0.03231382369995117,
+          -0.3025796413421631,
+          0.05385410785675049,
+          0.0011324882507324219,
+          0.07114946842193604
+        ],
+        "turns": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ]
+      },
+      "prev": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5,
+          122.5
+        ],
+        "y": [
+          -0.213120698928833,
+          -0.2585740089416504,
+          -0.26087427139282227,
+          -0.0900719165802002,
+          -0.18542265892028809,
+          -0.19098401069641113,
+          -0.14384150505065918,
+          -0.04472947120666504
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15,
+          17
+        ],
+        "hover": [
+          "T[2] ΔD=-0.213<br>上次supporter: Question<br>supporter段: T[1~1]",
+          "T[4] ΔD=-0.259<br>上次supporter: Question<br>supporter段: T[3~3]",
+          "T[6] ΔD=-0.261<br>上次supporter: Others<br>supporter段: T[5~5]",
+          "T[8] ΔD=-0.090<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[11] ΔD=-0.185<br>上次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[13] ΔD=-0.191<br>上次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[15] ΔD=-0.144<br>上次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[17] ΔD=-0.045<br>上次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "next": {
+        "x": [
+          5.5,
+          23.0,
+          41.5,
+          50.5,
+          77.5,
+          100.0,
+          107.5
+        ],
+        "y": [
+          -0.051473140716552734,
+          -0.34090399742126465,
+          -0.3786579370498657,
+          -0.016850829124450684,
+          -0.023355484008789062,
+          -0.42301058769226074,
+          -0.11478757858276367
+        ],
+        "turns": [
+          2,
+          4,
+          6,
+          8,
+          11,
+          13,
+          15
+        ],
+        "hover": [
+          "T[2] ΔD=-0.051<br>下次supporter: Question<br>supporter段: T[3~3]",
+          "T[4] ΔD=-0.341<br>下次supporter: Others<br>supporter段: T[5~5]",
+          "T[6] ΔD=-0.379<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[7~7]",
+          "T[8] ΔD=-0.017<br>下次supporter: Self-disclosure, Question<br>supporter段: T[9~10]",
+          "T[11] ΔD=-0.023<br>下次supporter: Restatement or Paraphrasing<br>supporter段: T[12~12]",
+          "T[13] ΔD=-0.423<br>下次supporter: Affirmation and Reassurance<br>supporter段: T[14~14]",
+          "T[15] ΔD=-0.115<br>下次supporter: Question<br>supporter段: T[16~16]"
+        ],
+        "strategies": [
+          [
+            "Question"
+          ],
+          [
+            "Others"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Self-disclosure",
+            "Question"
+          ],
+          [
+            "Restatement or Paraphrasing"
+          ],
+          [
+            "Affirmation and Reassurance"
+          ],
+          [
+            "Question"
+          ]
+        ],
+        "strategy_summary": [
+          "Question",
+          "Others",
+          "Affirmation and Reassurance",
+          "Self-disclosure, Question",
+          "Restatement or Paraphrasing",
+          "Affirmation and Reassurance",
+          "Question"
+        ]
+      },
+      "strategy_prev": {
+        "Question": {
+          "x": [
+            4.5,
+            22.0,
+            75.5,
+            121.5
+          ],
+          "y": [
+            -0.213120698928833,
+            -0.2585740089416504,
+            -0.18542265892028809,
+            -0.04472947120666504
+          ],
+          "hover": [
+            "T[2] | 上次supporter策略: Question",
+            "T[4] | 上次supporter策略: Question",
+            "T[11] | 上次supporter策略: Question",
+            "T[17] | 上次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            4,
+            11,
+            17
+          ]
+        },
+        "Others": {
+          "x": [
+            40.5
+          ],
+          "y": [
+            -0.26087427139282227
+          ],
+          "hover": [
+            "T[6] | 上次supporter策略: Others"
+          ],
+          "turns": [
+            6
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            49.5,
+            106.5
+          ],
+          "y": [
+            -0.0900719165802002,
+            -0.14384150505065918
+          ],
+          "hover": [
+            "T[8] | 上次supporter策略: Affirmation and Reassurance",
+            "T[15] | 上次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            8,
+            15
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            76.5
+          ],
+          "y": [
+            -0.18542265892028809
+          ],
+          "hover": [
+            "T[11] | 上次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            11
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            99.0
+          ],
+          "y": [
+            -0.19098401069641113
+          ],
+          "hover": [
+            "T[13] | 上次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            13
+          ]
+        }
+      },
+      "strategy_next": {
+        "Question": {
+          "x": [
+            6.5,
+            52.5,
+            108.5
+          ],
+          "y": [
+            -0.051473140716552734,
+            -0.016850829124450684,
+            -0.11478757858276367
+          ],
+          "hover": [
+            "T[2] | 下次supporter策略: Question",
+            "T[8] | 下次supporter策略: Question",
+            "T[15] | 下次supporter策略: Question"
+          ],
+          "turns": [
+            2,
+            8,
+            15
+          ]
+        },
+        "Others": {
+          "x": [
+            24.0
+          ],
+          "y": [
+            -0.34090399742126465
+          ],
+          "hover": [
+            "T[4] | 下次supporter策略: Others"
+          ],
+          "turns": [
+            4
+          ]
+        },
+        "Affirmation and Reassurance": {
+          "x": [
+            42.5,
+            101.0
+          ],
+          "y": [
+            -0.3786579370498657,
+            -0.42301058769226074
+          ],
+          "hover": [
+            "T[6] | 下次supporter策略: Affirmation and Reassurance",
+            "T[13] | 下次supporter策略: Affirmation and Reassurance"
+          ],
+          "turns": [
+            6,
+            13
+          ]
+        },
+        "Self-disclosure": {
+          "x": [
+            51.5
+          ],
+          "y": [
+            -0.016850829124450684
+          ],
+          "hover": [
+            "T[8] | 下次supporter策略: Self-disclosure"
+          ],
+          "turns": [
+            8
+          ]
+        },
+        "Restatement or Paraphrasing": {
+          "x": [
+            78.5
+          ],
+          "y": [
+            -0.023355484008789062
+          ],
+          "hover": [
+            "T[11] | 下次supporter策略: Restatement or Paraphrasing"
+          ],
+          "turns": [
+            11
+          ]
+        }
+      }
+    }
+  },
+  "main_context": {
+    "valence": {
+      "utt_x": [
+        2,
+        5,
+        23,
+        41,
+        50,
+        77,
+        100,
+        107,
+        122
+      ],
+      "utt_y": [
+        0.18718576431274414,
+        -0.4725208282470703,
+        -0.5392954349517822,
+        0.020576834678649902,
+        0.16903901100158691,
+        -0.36678314208984375,
+        -0.02036571502685547,
+        -0.034224510192871094,
+        0.037909746170043945
+      ],
+      "utt_turns": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ],
+      "ctx_x": [
+        5,
+        7,
+        40,
+        44,
+        58,
+        98,
+        103,
+        113
+      ],
+      "ctx_y": [
+        -0.16295790672302246,
+        -0.6254597902297974,
+        -0.4555976390838623,
+        0.17189860343933105,
+        -0.09990561008453369,
+        -0.3563687801361084,
+        -0.05508720874786377,
+        0.028493046760559082
+      ],
+      "ctx_turns": [
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ]
+    },
+    "arousal": {
+      "utt_x": [
+        2,
+        5,
+        23,
+        41,
+        50,
+        77,
+        100,
+        107,
+        122
+      ],
+      "utt_y": [
+        0.03662991523742676,
+        0.1808105707168579,
+        0.01991260051727295,
+        -0.10706984996795654,
+        -0.00026869773864746094,
+        0.1909346580505371,
+        -0.06697750091552734,
+        -0.10554027557373047,
+        0.013553857803344727
+      ],
+      "utt_turns": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ],
+      "ctx_x": [
+        5,
+        7,
+        40,
+        44,
+        58,
+        98,
+        103,
+        113
+      ],
+      "ctx_y": [
+        0.11144495010375977,
+        0.13197457790374756,
+        -0.0021224021911621094,
+        0.008454561233520508,
+        0.2042524814605713,
+        0.17608463764190674,
+        -0.10621678829193115,
+        -0.01741158962249756
+      ],
+      "ctx_turns": [
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ]
+    },
+    "dominance": {
+      "utt_x": [
+        2,
+        5,
+        23,
+        41,
+        50,
+        77,
+        100,
+        107,
+        122
+      ],
+      "utt_y": [
+        -0.0002663135528564453,
+        -0.24415171146392822,
+        -0.3044619560241699,
+        0.05906343460083008,
+        0.03231382369995117,
+        -0.3025796413421631,
+        0.05385410785675049,
+        0.0011324882507324219,
+        0.07114946842193604
+      ],
+      "utt_turns": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ],
+      "ctx_x": [
+        5,
+        7,
+        40,
+        44,
+        58,
+        98,
+        103,
+        113
+      ],
+      "ctx_y": [
+        -0.11446022987365723,
+        -0.3215610980987549,
+        -0.2415313720703125,
+        0.04705464839935303,
+        -0.12151718139648438,
+        -0.28914570808410645,
+        -0.009976625442504883,
+        0.06008148193359375
+      ],
+      "ctx_turns": [
+        2,
+        4,
+        6,
+        8,
+        11,
+        13,
+        15,
+        17
+      ]
+    }
+  },
+  "current_sync": {
+    "points": [
+      [
+        -0.7352676391601562,
+        -0.21422314643859863,
+        -0.213120698928833
+      ],
+      [
+        -0.44599390029907227,
+        0.12261855602264404,
+        -0.2585740089416504
+      ],
+      [
+        -0.4762263298034668,
+        -0.013361454010009766,
+        -0.26087427139282227
+      ],
+      [
+        0.09073758125305176,
+        -0.21915388107299805,
+        -0.0900719165802002
+      ],
+      [
+        -0.15947747230529785,
+        0.19335627555847168,
+        -0.18542265892028809
+      ],
+      [
+        -0.12997639179229736,
+        0.1647409200668335,
+        -0.19098401069641113
+      ],
+      [
+        -0.19679713249206543,
+        -0.17744863033294678,
+        -0.14384150505065918
+      ],
+      [
+        -0.07022857666015625,
+        -0.14945447444915771,
+        -0.04472947120666504
+      ]
+    ],
+    "turns": [
+      2,
+      4,
+      6,
+      8,
+      11,
+      13,
+      15,
+      17
+    ],
+    "utterance_spans": [
+      2.0,
+      33.0,
+      4.0,
+      14.0,
+      40.0,
+      5.0,
+      10.0,
+      20.0
+    ]
+  }
+}
