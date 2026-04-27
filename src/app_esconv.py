@@ -470,6 +470,7 @@ def _build_auto_diff_markers(dim, relation, relation_data, conv_id):
             'relation': relation,
             'dim': dim,
             'trend': trend,
+            'point_index': marker_idx,
             'x': xs[marker_idx],
             'y': ys[marker_idx],
             'turn': turns[marker_idx],
@@ -1544,7 +1545,21 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None, sync_
     auto_markers = (
         _build_auto_diff_markers(dim, 'prev', prev_series, cache.get('conv_id')) +
         _build_auto_diff_markers(dim, 'next', next_series, cache.get('conv_id')))
+    inside_turns = set()
+    if (
+        sync_current_data and
+        sync_current_data.get('conv_id') == cache.get('conv_id') and
+        isinstance(sync_current_data.get('inside_turns'), list)
+    ):
+        inside_turns = set(sync_current_data['inside_turns'])
     for marker in auto_markers:
+        if marker['relation'] == 'prev' and inside_turns:
+            point_index = marker.get('point_index')
+            if point_index is not None and point_index > 0:
+                current_turn = prev_series['turns'][point_index]
+                prev_turn = prev_series['turns'][point_index - 1]
+                if current_turn in inside_turns and prev_turn in inside_turns:
+                    continue
         trend_symbol = 'triangle-up' if marker['trend'] == 'rise' else 'triangle-down'
         marker_color = '#BF360C' if marker['relation'] == 'prev' else 'rgba(100,181,246,0.9)'
         marker_x = marker['x'] if marker['relation'] == 'prev' else marker['x'] + 0.35
@@ -1805,6 +1820,7 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
         'conv_id': sync_cache.get('conv_id'),
         'tail_pct': tail_pct,
         'confidence_pct': confidence_pct,
+        'inside_turns': [int(turns[i]) for i in np.where(inside)[0]],
         'outside_turns': [int(turns[i]) for i in np.where(~inside)[0]],
     }
 
