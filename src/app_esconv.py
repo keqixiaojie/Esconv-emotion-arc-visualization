@@ -259,8 +259,15 @@ def _build_turn_x_helpers(results, utterances, is_sent):
 
         def xmid(i): return float(word_starts[i] + (word_counts[i] - 1) / 2.0)
         def xbg(i): return float(word_starts[i])
+        def xspan(i): return float(word_counts[i])
 
-        return xmid, xbg, {u['turn_index']: xmid(i) for i, u in enumerate(utterances)}
+        return (
+            xmid,
+            xbg,
+            xspan,
+            {u['turn_index']: xmid(i) for i, u in enumerate(utterances)},
+            {u['turn_index']: xspan(i) for i, u in enumerate(utterances)},
+        )
 
     turn_word_ranges = {}
     for idx, r in enumerate(results):
@@ -279,8 +286,18 @@ def _build_turn_x_helpers(results, utterances, is_sent):
         turn_idx = utterances[i]['turn_index']
         lo, _ = turn_word_ranges.get(turn_idx, (i, i))
         return float(lo)
+    def xspan(i):
+        turn_idx = utterances[i]['turn_index']
+        lo, hi = turn_word_ranges.get(turn_idx, (i, i))
+        return float(max(1, hi - lo + 1))
 
-    return xmid, xbg, {u['turn_index']: xmid(i) for i, u in enumerate(utterances)}
+    return (
+        xmid,
+        xbg,
+        xspan,
+        {u['turn_index']: xmid(i) for i, u in enumerate(utterances)},
+        {u['turn_index']: xspan(i) for i, u in enumerate(utterances)},
+    )
 
 def _interpolate_turn_x(turn_to_x, turn_idx):
     if turn_idx in turn_to_x:
@@ -325,7 +342,7 @@ def _compute_diff_series(dim, ws, smooth_mode, cache):
         return None
 
     is_sent = (cache.get('granularity') == 'sentence')
-    xmid, xbg, turn_to_x = _build_turn_x_helpers(cache.get('results', []), utterances, is_sent)
+    xmid, xbg, _xspan, turn_to_x, _turn_to_width = _build_turn_x_helpers(cache.get('results', []), utterances, is_sent)
     seeker_raw_scores = _utterance_scores_from_results(results, utterances, dim, is_sent)
     seeker_turns = [u['turn_index'] for u in utterances]
     supp_blocks = _build_supporter_blocks(bg_utterances, seeker_turns)
@@ -748,6 +765,10 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
     if not cache or cache.get('speaker') != 'seeker':
         return None
     actual_mode = 'context' if smooth_mode == 'context' and cache.get('granularity') == 'sentence' else 'avg'
+    utterances = cache.get('utterances', [])
+    results = cache.get('results', [])
+    is_sent = (cache.get('granularity') == 'sentence')
+    _xmid, _xbg, _xspan, _turn_to_x, turn_to_width = _build_turn_x_helpers(results, utterances, is_sent)
     series = {
         dim: _compute_diff_series(dim, ws, actual_mode, cache)
         for dim in ['valence', 'arousal', 'dominance']
@@ -764,7 +785,11 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
             np.asarray(series['arousal']['prev']['y'][:size], dtype=float),
             np.asarray(series['dominance']['prev']['y'][:size], dtype=float),
         ]),
-        'turns': series['valence']['prev']['turns'][:size]
+        'turns': series['valence']['prev']['turns'][:size],
+        'utterance_spans': np.asarray([
+            float(turn_to_width.get(turn_idx, 1.0))
+            for turn_idx in series['valence']['prev']['turns'][:size]
+        ], dtype=float),
     }
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
@@ -1661,8 +1686,11 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
     chi2_threshold = float(dataset['chi2_threshold'])
     points = current['points']
     turns = current['turns']
+    utterance_spans = np.asarray(current['utterance_spans'], dtype=float)
     inside, dist2 = _mahalanobis_inside(points, mean, cov, chi2_threshold)
-    sync_rate = float(np.mean(inside)) if len(points) else 0.0
+    total_span = float(np.sum(utterance_spans))
+    inside_span = float(np.sum(utterance_spans * inside.astype(float)))
+    sync_rate = (inside_span / total_span) if total_span > 0 else 0.0
 
     sampled = np.asarray(dataset['sample_points'], dtype=float)
     tail_pct = dataset.get('tail_pct', 25)
@@ -1724,7 +1752,8 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
 
     info = html.Div([
         html.Span(
-            f"同步率: {sync_rate:.1%}（{int(np.sum(inside))}/{len(points)} 个有效差值时刻）",
+            f"同步率: {sync_rate:.1%}（按 seeker 话语在背景阶梯图上的真实跨度加权；"
+            f"同步跨度 {inside_span:.1f} / 总跨度 {total_span:.1f}）",
             style={'marginRight': '18px', 'fontWeight': 'bold', 'color': '#2E7D32'}),
         html.Span(
             f"正态近似中心: μ=({mean[0]:.3f}, {mean[1]:.3f}, {mean[2]:.3f})",
