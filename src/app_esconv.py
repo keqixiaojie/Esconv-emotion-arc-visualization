@@ -363,6 +363,13 @@ def _build_turn_x_helpers(results, utterances, is_sent):
     )
 
 def _interpolate_turn_x(turn_to_x, turn_idx):
+    if isinstance(turn_idx, str):
+        try:
+            turn_idx = int(turn_idx)
+        except ValueError:
+            return None
+    if turn_to_x and isinstance(next(iter(turn_to_x.keys())), str):
+        turn_to_x = {int(k): v for k, v in turn_to_x.items()}
     if turn_idx in turn_to_x:
         return turn_to_x[turn_idx]
     keys = sorted(turn_to_x.keys())
@@ -396,7 +403,20 @@ def _serialize_default_diff_bundle(bundle):
     return bundle
 
 def _restore_default_diff_bundle(bundle):
-    return bundle
+    restored = dict(bundle)
+    dims = restored.get('dims')
+    if isinstance(dims, dict):
+        fixed_dims = {}
+        for dim, series in dims.items():
+            fixed_series = dict(series)
+            turn_to_x = fixed_series.get('turn_to_x')
+            if isinstance(turn_to_x, dict):
+                fixed_series['turn_to_x'] = {
+                    int(k): float(v) for k, v in turn_to_x.items()
+                }
+            fixed_dims[dim] = fixed_series
+        restored['dims'] = fixed_dims
+    return restored
 
 def _is_default_diff_mode(cache, ws, smooth_mode):
     if not cache:
