@@ -80,6 +80,7 @@ SYNC_RANGE_MEMORY_CACHE = {}
 SYNC_VIEW_CACHE_MEMORY = {}
 SYNC_CURRENT_POINTS_MEMORY_CACHE = {}
 DEFAULT_DIFF_MEMORY_CACHE = {}
+ALL_SYNC_RATE_MEMORY_CACHE = {}
 
 # 存储格式: { "conv_0": [{"turn":3,"speaker":"seeker","label":"..."}, ...] }
 def _ck(cid): return f"conv_{cid}"
@@ -948,6 +949,159 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
             }
     return _compute_current_sync_points_fresh(cache, ws, smooth_mode)
 
+def _compute_sync_rate_from_current(current, mean, cov, confidence_ratio):
+    points = np.asarray(current['points'], dtype=float)
+    spans = np.asarray(current['utterance_spans'], dtype=float)
+    chi2_threshold = float(chi2.ppf(confidence_ratio, df=3))
+    inside, dist2 = _mahalanobis_inside(points, mean, cov, chi2_threshold)
+    total_span = float(np.sum(spans))
+    inside_span = float(np.sum(spans * inside.astype(float)))
+    sync_rate = (inside_span / total_span) if total_span > 0 else 0.0
+    return {
+        'inside': inside,
+        'dist2': dist2,
+        'total_span': total_span,
+        'inside_span': inside_span,
+        'sync_rate': sync_rate,
+        'chi2_threshold': chi2_threshold,
+    }
+
+def _compute_all_sync_rates(tail_pct, confidence_pct):
+    tail_pct = int(tail_pct or 25)
+    confidence_pct = int(confidence_pct or round(SYNC_CONFIDENCE * 100))
+    cache_key = (tail_pct, confidence_pct)
+    if cache_key in ALL_SYNC_RATE_MEMORY_CACHE:
+        return ALL_SYNC_RATE_MEMORY_CACHE[cache_key]
+
+    tail_ratio = tail_pct / 100.0
+    confidence_ratio = confidence_pct / 100.0
+    sync_ws, sync_mode, sync_granularity = _get_sync_defaults()
+    dataset = _load_sync_dataset_cached_only(tail_ratio, sync_ws, sync_mode, sync_granularity)
+    if dataset is None:
+        return None
+    mean = np.asarray(dataset['mean'], dtype=float)
+    cov = np.asarray(dataset['cov'], dtype=float)
+
+    rows = []
+    for conv_id in conv_ids:
+        bundle = _load_default_diff_bundle(conv_id, compute_if_missing=True)
+        if not bundle or not bundle.get('current_sync'):
+            continue
+        current_sync = bundle['current_sync']
+        points = np.asarray(current_sync['points'], dtype=float)
+        turns = list(current_sync['turns'])
+        spans = np.asarray(current_sync['utterance_spans'], dtype=float)
+        size = len(points)
+        if size <= 0:
+            continue
+        if tail_ratio <= 0:
+            start_idx = 0
+        else:
+            tail_count = max(1, int(np.ceil(size * tail_ratio)))
+            start_idx = max(0, size - tail_count)
+        current = {
+            'points': points[start_idx:],
+            'turns': turns[start_idx:],
+            'utterance_spans': spans[start_idx:],
+        }
+        if len(current['points']) == 0:
+            continue
+        metrics = _compute_sync_rate_from_current(current, mean, cov, confidence_ratio)
+        rows.append({
+            'conv_id': conv_id,
+            'sync_rate': metrics['sync_rate'],
+            'inside_span': metrics['inside_span'],
+            'total_span': metrics['total_span'],
+            'tail_points': int(len(current['points'])),
+            'inside_points': int(np.sum(metrics['inside'])),
+            'mean_dist2': float(np.mean(metrics['dist2'])) if len(metrics['dist2']) else 0.0,
+        })
+
+    rows.sort(key=lambda row: row['sync_rate'])
+    result = {
+        'tail_pct': tail_pct,
+        'confidence_pct': confidence_pct,
+        'rows': rows,
+    }
+    ALL_SYNC_RATE_MEMORY_CACHE[cache_key] = result
+    return result
+
+def _cluster_sync_rates(rows, k):
+    if not rows:
+        return [], np.asarray([], dtype=float)
+    k = max(1, min(int(k), len(rows)))
+    values = np.asarray([row['sync_rate'] for row in rows], dtype=float)
+    if k == 1:
+        return np.zeros(len(values), dtype=int), np.asarray([float(np.mean(values))], dtype=float)
+
+    quantiles = np.linspace(0.0, 1.0, k + 2)[1:-1]
+    centers = np.quantile(values, quantiles)
+    centers = np.asarray(centers, dtype=float)
+    for _ in range(50):
+        labels = np.argmin(np.abs(values[:, None] - centers[None, :]), axis=1)
+        new_centers = centers.copy()
+        for idx in range(k):
+            members = values[labels == idx]
+            if len(members) > 0:
+                new_centers[idx] = float(np.mean(members))
+        if np.allclose(new_centers, centers):
+            break
+        centers = new_centers
+
+    order = np.argsort(centers)
+    remap = {old: new for new, old in enumerate(order.tolist())}
+    labels = np.asarray([remap[int(label)] for label in labels], dtype=int)
+    centers = centers[order]
+    return labels, centers
+
+def _build_sync_cluster_figure(cluster_data, k, selected_conv_id=None):
+    fig = go.Figure()
+    rows = cluster_data.get('rows', []) if cluster_data else []
+    if not rows:
+        fig.update_layout(
+            title="同步率聚类",
+            height=340, margin=dict(l=40, r=20, t=40, b=40))
+        return fig, "暂无可聚类的同步率数据。"
+
+    labels, centers = _cluster_sync_rates(rows, k)
+    palette = ['#1565C0', '#2E7D32', '#EF6C00', '#6A1B9A', '#C62828', '#00838F', '#5D4037', '#AD1457']
+    xs = np.asarray([row['sync_rate'] for row in rows], dtype=float)
+    ys = labels.astype(float)
+    colors = [palette[label % len(palette)] for label in labels]
+    hover = [
+        f"#{rows[i]['conv_id']}<br>同步率={rows[i]['sync_rate']:.2%}<br>"
+        f"同步跨度={rows[i]['inside_span']:.1f}/{rows[i]['total_span']:.1f}<br>"
+        f"cluster={labels[i]}"
+        for i in range(len(rows))
+    ]
+    symbols = ['diamond' if selected_conv_id is not None and rows[i]['conv_id'] == selected_conv_id else 'circle'
+               for i in range(len(rows))]
+    sizes = [11 if selected_conv_id is not None and rows[i]['conv_id'] == selected_conv_id else 8
+             for i in range(len(rows))]
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode='markers+text',
+        marker=dict(color=colors, size=sizes, symbol=symbols, line=dict(width=1, color='white')),
+        text=[f"#{row['conv_id']}" for row in rows],
+        textposition='top center',
+        textfont=dict(size=9, color='#37474F'),
+        customdata=[row['conv_id'] for row in rows],
+        hovertext=hover, hoverinfo='text',
+        name='对话'))
+    for idx, center in enumerate(centers):
+        fig.add_vline(x=float(center), line_dash='dot', line_color=palette[idx % len(palette)], opacity=0.6)
+    fig.update_layout(
+        title=f"全数据同步率聚类 | k={k}",
+        xaxis_title='同步率',
+        yaxis_title='簇编号',
+        yaxis=dict(tickmode='array', tickvals=list(range(len(centers))), range=[-0.5, len(centers) - 0.5]),
+        height=340, margin=dict(l=40, r=20, t=40, b=40),
+        hovermode='closest')
+    summary = ' | '.join([
+        f"簇{idx}: 中心 {centers[idx]:.2%} ({int(np.sum(labels == idx))} 个对话)"
+        for idx in range(len(centers))
+    ])
+    return fig, summary
+
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "ESConv 对话情感弧线分析"
 
@@ -1067,6 +1221,24 @@ app.layout = html.Div([
             dcc.Graph(id='graph-sync-3d'),
             dcc.Graph(id='graph-sync-kde'),
             html.Div(id='sync-info', style={
+                'padding': '6px 12px', 'fontSize': '12px', 'color': '#555',
+                'backgroundColor': '#f8f9fa', 'borderRadius': '6px', 'marginTop': '4px'})
+        ])
+    ], style={'marginTop': '8px', 'borderTop': '1px solid #ddd', 'paddingTop': '4px'}),
+    html.Div([
+        html.Div("🧩 全数据同步率聚类（与上方同步范围参数对齐）",
+                 style={'fontSize': '13px', 'fontWeight': 'bold', 'padding': '8px 12px 4px',
+                        'color': '#555'}),
+        html.Div([
+            html.Label("类别数 k:", style={'fontWeight': 'bold'}),
+            dcc.Slider(
+                id='sync-cluster-k-slider', min=2, max=8, step=1, value=4,
+                marks={i: str(i) for i in range(2, 9)},
+                tooltip={"placement": "bottom", "always_visible": True})
+        ], style={'padding': '8px 12px'}),
+        dcc.Loading(type='circle', color='#666', children=[
+            dcc.Graph(id='graph-sync-clusters'),
+            html.Div(id='sync-cluster-info', style={
                 'padding': '6px 12px', 'fontSize': '12px', 'color': '#555',
                 'backgroundColor': '#f8f9fa', 'borderRadius': '6px', 'marginTop': '4px'})
         ])
@@ -1994,6 +2166,32 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
             style={'color': '#666'})
     ])
     return fig, kde_fig, info, sync_current_data
+
+
+@app.callback(
+    Output('graph-sync-clusters', 'figure'),
+    Output('sync-cluster-info', 'children'),
+    Input('sync-tail-slider', 'value'),
+    Input('sync-confidence-slider', 'value'),
+    Input('sync-cluster-k-slider', 'value'),
+    Input('conv-id-dropdown', 'value'))
+def update_sync_clusters(tail_pct, confidence_pct, k, selected_conv_id):
+    cluster_data = _compute_all_sync_rates(tail_pct, confidence_pct)
+    if cluster_data is None:
+        fig = go.Figure()
+        fig.update_layout(title="同步率聚类", height=340, margin=dict(l=40, r=20, t=40, b=40))
+        fig.add_annotation(
+            text="缺少默认差值缓存或同步范围缓存，请先完成预计算。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return fig, "当前无法计算全数据同步率聚类。"
+    fig, summary = _build_sync_cluster_figure(cluster_data, k or 4, selected_conv_id)
+    info = html.Div([
+        html.Span(
+            f"参数对齐：尾段 {cluster_data['tail_pct']}% | 椭圆置信度 {cluster_data['confidence_pct']}% | k={int(k or 4)}",
+            style={'marginRight': '18px', 'fontWeight': 'bold'}),
+        html.Span(summary, style={'color': '#666'})
+    ])
+    return fig, info
 
 
 @app.callback(
