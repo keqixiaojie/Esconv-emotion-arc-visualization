@@ -43,22 +43,6 @@ def load_default_sync_series(conv_id: int):
     }
 
 
-def tail_slice(points, spans, turns, tail_ratio: float):
-    size = len(points)
-    if size <= 0:
-        return None
-    if tail_ratio <= 0:
-        start_idx = 0
-    else:
-        tail_count = max(1, int(np.ceil(size * tail_ratio)))
-        start_idx = max(0, size - tail_count)
-    return (
-        np.asarray(points[start_idx:], dtype=float),
-        np.asarray(spans[start_idx:], dtype=float),
-        list(turns[start_idx:]),
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Compute synchrony rates for all conversations from cached default diff arcs.")
@@ -86,18 +70,23 @@ def main():
             print(f"loaded {idx}/{len(conv_ids)} bundles | kept {len(series_all)}", flush=True)
 
     dataset_points = []
-    per_conv_tail = {}
+    per_conv_current = {}
     for item in series_all:
-        sliced = tail_slice(item["points"], item["utterance_spans"], item["turns"], tail_ratio)
-        if sliced is None:
+        size = len(item["points"])
+        if size <= 0:
             continue
-        tail_points, tail_spans, tail_turns = sliced
+        if tail_ratio <= 0:
+            start_idx = 0
+        else:
+            tail_count = max(1, int(np.ceil(size * tail_ratio)))
+            start_idx = max(0, size - tail_count)
+        tail_points = np.asarray(item["points"][start_idx:], dtype=float)
         if len(tail_points) == 0:
             continue
-        per_conv_tail[item["conv_id"]] = {
-            "points": tail_points,
-            "spans": tail_spans,
-            "turns": tail_turns,
+        per_conv_current[item["conv_id"]] = {
+            "points": np.asarray(item["points"], dtype=float),
+            "spans": np.asarray(item["utterance_spans"], dtype=float),
+            "turns": list(item["turns"]),
         }
         dataset_points.append(tail_points)
 
@@ -111,8 +100,8 @@ def main():
     chi2_threshold = float(chi2.ppf(confidence_ratio, df=3))
 
     rows = []
-    for conv_id in sorted(per_conv_tail.keys()):
-        item = per_conv_tail[conv_id]
+    for conv_id in sorted(per_conv_current.keys()):
+        item = per_conv_current[conv_id]
         inside, dist2 = _mahalanobis_inside(item["points"], mean, cov, chi2_threshold)
         total_span = float(np.sum(item["spans"]))
         inside_span = float(np.sum(item["spans"] * inside.astype(float)))
@@ -122,7 +111,7 @@ def main():
             "sync_rate": sync_rate,
             "inside_span": inside_span,
             "total_span": total_span,
-            "tail_points": int(len(item["points"])),
+            "total_points": int(len(item["points"])),
             "inside_points": int(np.sum(inside)),
             "mean_dist2": float(np.mean(dist2)) if len(dist2) else 0.0,
         })
@@ -134,7 +123,7 @@ def main():
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["conv_id", "sync_rate", "inside_span", "total_span", "tail_points", "inside_points", "mean_dist2"],
+            fieldnames=["conv_id", "sync_rate", "inside_span", "total_span", "total_points", "inside_points", "mean_dist2"],
         )
         writer.writeheader()
         writer.writerows(rows)

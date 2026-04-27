@@ -988,21 +988,10 @@ def _compute_all_sync_rates(tail_pct, confidence_pct):
         if not bundle or not bundle.get('current_sync'):
             continue
         current_sync = bundle['current_sync']
-        points = np.asarray(current_sync['points'], dtype=float)
-        turns = list(current_sync['turns'])
-        spans = np.asarray(current_sync['utterance_spans'], dtype=float)
-        size = len(points)
-        if size <= 0:
-            continue
-        if tail_ratio <= 0:
-            start_idx = 0
-        else:
-            tail_count = max(1, int(np.ceil(size * tail_ratio)))
-            start_idx = max(0, size - tail_count)
         current = {
-            'points': points[start_idx:],
-            'turns': turns[start_idx:],
-            'utterance_spans': spans[start_idx:],
+            'points': np.asarray(current_sync['points'], dtype=float),
+            'turns': list(current_sync['turns']),
+            'utterance_spans': np.asarray(current_sync['utterance_spans'], dtype=float),
         }
         if len(current['points']) == 0:
             continue
@@ -1012,7 +1001,7 @@ def _compute_all_sync_rates(tail_pct, confidence_pct):
             'sync_rate': metrics['sync_rate'],
             'inside_span': metrics['inside_span'],
             'total_span': metrics['total_span'],
-            'tail_points': int(len(current['points'])),
+            'total_points': int(len(current['points'])),
             'inside_points': int(np.sum(metrics['inside'])),
             'mean_dist2': float(np.mean(metrics['dist2'])) if len(metrics['dist2']) else 0.0,
         })
