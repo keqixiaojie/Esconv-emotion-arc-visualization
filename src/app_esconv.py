@@ -45,6 +45,9 @@ SYNC_CONFIDENCE = 2.0 / 3.0
 SYNC_PLOT_MAX_POINTS = 2500
 SYNC_CACHE_VERSION = 5
 SYNC_ELLIPSOID_RESOLUTION = 22
+SYNC_DEFAULT_WINDOW_SIZE = 2
+SYNC_DEFAULT_GRANULARITY = 'sentence'
+SYNC_DEFAULT_SMOOTH_MODE = 'context'
 AUTO_TREND_SKIP_POINTS = 2
 AUTO_TREND_MIN_DELTA = 0.1
 SYNC_KDE_GRID_SIZE = 55
@@ -721,6 +724,26 @@ def _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity, compute_if_m
 def _load_sync_dataset_cached_only(tail_ratio, ws, smooth_mode, granularity):
     return _compute_sync_dataset(tail_ratio, ws, smooth_mode, granularity, compute_if_missing=False)
 
+def _get_sync_defaults():
+    if sent_predictor is None:
+        return SYNC_DEFAULT_WINDOW_SIZE, 'avg', 'word'
+    return SYNC_DEFAULT_WINDOW_SIZE, SYNC_DEFAULT_SMOOTH_MODE, SYNC_DEFAULT_GRANULARITY
+
+def _get_sync_view_cache(base_cache):
+    if not base_cache:
+        return None
+    conv_id = base_cache.get('conv_id')
+    if conv_id is None:
+        return None
+    sync_ws, sync_mode, sync_granularity = _get_sync_defaults()
+    if (
+        base_cache.get('speaker') == 'seeker' and
+        base_cache.get('granularity') == sync_granularity
+    ):
+        return base_cache
+    sync_cache, _ = build_conversation_cache(conv_id, 'seeker', sync_granularity, persist=False)
+    return sync_cache
+
 def _compute_current_sync_points(cache, ws, smooth_mode):
     if not cache or cache.get('speaker') != 'seeker':
         return None
@@ -843,7 +866,8 @@ app.layout = html.Div([
                     tooltip={"placement": "bottom", "always_visible": True})
             ], style={'width': '55%', 'display': 'inline-block', 'verticalAlign': 'middle'}),
             html.Div(
-                "按状态差值图横坐标的最后 X% 截取；0% 表示不截尾，使用整段差值序列。",
+                "按状态差值图横坐标的最后 X% 截取；0% 表示不截尾，使用整段差值序列。"
+                "同步范围固定按默认模式计算：句粒度 / 上下文窗口 / W=2。",
                 style={'display': 'inline-block', 'marginLeft': '30px', 'fontSize': '12px', 'color': '#666'})
         ], style={'padding': '8px 12px'}),
         dcc.Loading(type='circle', color='#666', children=[
@@ -1546,30 +1570,29 @@ def update_graphs(ws, smooth_mode, cache, markers, mf):
 
 @app.callback(
     Output('sync-dataset-store', 'data'),
-    Input('sync-tail-slider', 'value'),
-    Input('window-slider', 'value'),
-    Input('smooth-mode-radio', 'value'),
-    Input('granularity-radio', 'value'))
-def load_sync_dataset_store(tail_pct, ws, smooth_mode, granularity):
+    Input('sync-tail-slider', 'value'))
+def load_sync_dataset_store(tail_pct):
     tail_pct = tail_pct or 25
     tail_ratio = tail_pct / 100.0
-    dataset = _load_sync_dataset_cached_only(tail_ratio, ws, smooth_mode, granularity)
-    actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
+    sync_ws, sync_mode, sync_granularity = _get_sync_defaults()
+    dataset = _load_sync_dataset_cached_only(tail_ratio, sync_ws, sync_mode, sync_granularity)
     if dataset is None:
         return {
             'available': False,
             'tail_pct': tail_pct,
-            'window_size': ws,
-            'smooth_mode': actual_mode,
-            'granularity': granularity,
-            'cache_key': _sync_cache_key(tail_ratio, ws, actual_mode, granularity),
+            'window_size': sync_ws,
+            'smooth_mode': sync_mode,
+            'granularity': sync_granularity,
+            'cache_key': _sync_cache_key(tail_ratio, sync_ws, sync_mode, sync_granularity),
         }
     serializable = _serialize_sync_dataset(dataset)
     serializable.update({
         'available': True,
         'tail_pct': tail_pct,
-        'window_size': ws,
-        'cache_key': _sync_cache_key(tail_ratio, ws, actual_mode, granularity),
+        'window_size': sync_ws,
+        'smooth_mode': sync_mode,
+        'granularity': sync_granularity,
+        'cache_key': _sync_cache_key(tail_ratio, sync_ws, sync_mode, sync_granularity),
     })
     return serializable
 
@@ -1580,11 +1603,8 @@ def load_sync_dataset_store(tail_pct, ws, smooth_mode, granularity):
     Output('sync-info', 'children'),
     Input('sync-dataset-store', 'data'),
     Input('sync-tail-slider', 'value'),
-    Input('window-slider', 'value'),
-    Input('smooth-mode-radio', 'value'),
-    Input('granularity-radio', 'value'),
     Input('vad-cache-store', 'data'))
-def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, cache):
+def update_sync_view(sync_dataset_data, tail_pct, cache):
     empty = go.Figure()
     empty.update_layout(
         title="同步范围三维分布",
@@ -1595,21 +1615,22 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
         title="同步范围 KDE 投影",
         height=420, margin=dict(l=30, r=20, t=50, b=30))
 
-    if not cache or cache.get('speaker') != 'seeker':
+    sync_ws, sync_mode, sync_granularity = _get_sync_defaults()
+    sync_cache = _get_sync_view_cache(cache)
+    if not sync_cache:
         empty.add_annotation(
-            text="同步范围当前按 seeker − 上次supporter 计算，请切换到 Seeker 视角。",
+            text="请先选择一个对话后再查看同步范围。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
         empty_kde.add_annotation(
-            text="切换到 Seeker 视角后显示 KDE 投影。",
+            text="请先选择一个对话后再查看 KDE 投影。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, empty_kde, "当前仅在 Seeker 视角下计算同步范围和同步率。"
+        return empty, empty_kde, "当前没有可用对话，无法显示同步范围。"
 
     tail_pct = tail_pct or 25
     tail_ratio = tail_pct / 100.0
-    actual_mode = 'context' if smooth_mode == 'context' and granularity == 'sentence' else 'avg'
-    cache_key = _sync_cache_key(tail_ratio, ws, actual_mode, granularity)
+    cache_key = _sync_cache_key(tail_ratio, sync_ws, sync_mode, sync_granularity)
 
-    dataset = _load_sync_dataset_cached_only(tail_ratio, ws, actual_mode, granularity)
+    dataset = _load_sync_dataset_cached_only(tail_ratio, sync_ws, sync_mode, sync_granularity)
     if dataset is None and sync_dataset_data and sync_dataset_data.get('available'):
         sync_key = sync_dataset_data.get('cache_key')
         if sync_key == cache_key:
@@ -1623,7 +1644,7 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
         return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
 
-    current = _compute_current_sync_points(cache, ws, smooth_mode)
+    current = _compute_current_sync_points(sync_cache, sync_ws, sync_mode)
     if dataset is None or current is None:
         empty.add_annotation(
             text="当前参数下没有足够的差值点可用于同步范围统计。",
@@ -1684,7 +1705,7 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
 
     fig.update_layout(
         title=(
-            f"#{cache.get('conv_id', '?')} | 同步范围 3D | 尾段 {tail_pct}% | "
+            f"#{sync_cache.get('conv_id', '?')} | 同步范围 3D | 尾段 {tail_pct}% | "
             f"同步率 {sync_rate:.1%}"
         ),
         scene=dict(
@@ -1699,7 +1720,7 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
         height=520, margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
 
-    kde_fig = _build_sync_kde_figure(dataset.get('kde_data', {}), points, inside, turns, cache, tail_pct)
+    kde_fig = _build_sync_kde_figure(dataset.get('kde_data', {}), points, inside, turns, sync_cache, tail_pct)
 
     info = html.Div([
         html.Span(
@@ -1714,6 +1735,7 @@ def update_sync_view(sync_dataset_data, tail_pct, ws, smooth_mode, granularity, 
             f"外围分位参考 V[{low[0]:.3f}, {high[0]:.3f}] "
             f"A[{low[1]:.3f}, {high[1]:.3f}] "
             f"D[{low[2]:.3f}, {high[2]:.3f}]；"
+            f"固定默认模式：{sync_granularity} / {sync_mode} / W={sync_ws}；"
             f"缓存键 {dataset.get('cache_key', 'n/a')}",
             style={'color': '#666'})
     ])
