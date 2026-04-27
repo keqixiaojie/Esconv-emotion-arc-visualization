@@ -1091,6 +1091,56 @@ def _build_sync_cluster_figure(cluster_data, k, selected_conv_id=None):
     ])
     return fig, summary
 
+def _build_sync_cluster_distribution_figure(cluster_data, k, selected_conv_id=None):
+    fig = go.Figure()
+    rows = cluster_data.get('rows', []) if cluster_data else []
+    if not rows:
+        fig.update_layout(
+            title="同步率分布",
+            height=260, margin=dict(l=40, r=20, t=40, b=40))
+        return fig
+
+    labels, centers = _cluster_sync_rates(rows, k)
+    palette = ['#1565C0', '#2E7D32', '#EF6C00', '#6A1B9A', '#C62828', '#00838F', '#5D4037', '#AD1457']
+    xs = np.asarray([row['sync_rate'] for row in rows], dtype=float)
+    fig.add_trace(go.Histogram(
+        x=xs,
+        nbinsx=24,
+        marker=dict(color='rgba(120,144,156,0.55)', line=dict(color='white', width=1)),
+        name='同步率分布',
+        hovertemplate='同步率区间中心=%{x:.2%}<br>对话数=%{y}<extra></extra>'))
+
+    for idx, center in enumerate(centers):
+        fig.add_vline(
+            x=float(center),
+            line_dash='dot',
+            line_color=palette[idx % len(palette)],
+            opacity=0.75,
+            annotation_text=f'簇{idx}: {center:.1%}',
+            annotation_position='top')
+
+    if selected_conv_id is not None:
+        selected = next((row for row in rows if row['conv_id'] == selected_conv_id), None)
+        if selected is not None:
+            fig.add_vline(
+                x=float(selected['sync_rate']),
+                line_dash='solid',
+                line_color='#C62828',
+                line_width=2,
+                opacity=0.9,
+                annotation_text=f"#{selected_conv_id}: {selected['sync_rate']:.1%}",
+                annotation_position='bottom')
+
+    fig.update_layout(
+        title=f"同步率分布 | k={k}",
+        xaxis_title='同步率',
+        yaxis_title='对话数',
+        bargap=0.06,
+        height=260,
+        margin=dict(l=40, r=20, t=40, b=40),
+        hovermode='x')
+    return fig
+
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "ESConv 对话情感弧线分析"
 
@@ -1227,6 +1277,7 @@ app.layout = html.Div([
         ], style={'padding': '8px 12px'}),
         dcc.Loading(type='circle', color='#666', children=[
             dcc.Graph(id='graph-sync-clusters'),
+            dcc.Graph(id='graph-sync-cluster-dist'),
             html.Div(id='sync-cluster-info', style={
                 'padding': '6px 12px', 'fontSize': '12px', 'color': '#555',
                 'backgroundColor': '#f8f9fa', 'borderRadius': '6px', 'marginTop': '4px'})
@@ -2091,7 +2142,10 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
     if np.any(inside):
         fig.add_trace(go.Scatter3d(
             x=points[inside, 0], y=points[inside, 1], z=points[inside, 2],
-            mode='markers', name='同步区内',
+            mode='markers+text', name='同步区内',
+            text=[f"T[{turns[i]}]" for i in np.where(inside)[0]],
+            textposition='top center',
+            textfont=dict(size=9, color='#1B5E20'),
             marker=dict(size=6, color='#2E7D32', opacity=0.95),
             hovertext=[
                 f"T[{turns[i]}] 在同步范围内<br>Mahalanobis^2={dist2[i]:.3f}"
@@ -2101,7 +2155,10 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
     if np.any(~inside):
         fig.add_trace(go.Scatter3d(
             x=points[~inside, 0], y=points[~inside, 1], z=points[~inside, 2],
-            mode='markers', name='同步区外',
+            mode='markers+text', name='同步区外',
+            text=[f"T[{turns[i]}]" for i in np.where(~inside)[0]],
+            textposition='top center',
+            textfont=dict(size=9, color='#8E0000'),
             marker=dict(size=6, color='#C62828', opacity=0.9),
             hovertext=[
                 f"T[{turns[i]}] 在同步范围外<br>Mahalanobis^2={dist2[i]:.3f}"
@@ -2159,6 +2216,7 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
 
 @app.callback(
     Output('graph-sync-clusters', 'figure'),
+    Output('graph-sync-cluster-dist', 'figure'),
     Output('sync-cluster-info', 'children'),
     Input('sync-tail-slider', 'value'),
     Input('sync-confidence-slider', 'value'),
@@ -2172,15 +2230,21 @@ def update_sync_clusters(tail_pct, confidence_pct, k, selected_conv_id):
         fig.add_annotation(
             text="缺少默认差值缓存或同步范围缓存，请先完成预计算。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return fig, "当前无法计算全数据同步率聚类。"
+        dist_fig = go.Figure()
+        dist_fig.update_layout(title="同步率分布", height=260, margin=dict(l=40, r=20, t=40, b=40))
+        dist_fig.add_annotation(
+            text="缺少默认差值缓存或同步范围缓存。",
+            x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
+        return fig, dist_fig, "当前无法计算全数据同步率聚类。"
     fig, summary = _build_sync_cluster_figure(cluster_data, k or 4, selected_conv_id)
+    dist_fig = _build_sync_cluster_distribution_figure(cluster_data, k or 4, selected_conv_id)
     info = html.Div([
         html.Span(
             f"参数对齐：尾段 {cluster_data['tail_pct']}% | 椭圆置信度 {cluster_data['confidence_pct']}% | k={int(k or 4)}",
             style={'marginRight': '18px', 'fontWeight': 'bold'}),
         html.Span(summary, style={'color': '#666'})
     ])
-    return fig, info
+    return fig, dist_fig, info
 
 
 @app.callback(
