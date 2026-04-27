@@ -15,10 +15,12 @@ LEXICON_PATH = "NRC-VAD-Lexicon-v2.1.txt"
 ESCONV_PATH = "ESConv-strategy.json"
 CACHE_DIR = "src/cache"
 SYNC_RANGE_DIR = os.path.join(CACHE_DIR, "sync_ranges")
+DEFAULT_DIFF_CACHE_DIR = os.path.join(CACHE_DIR, "default_diff_arcs")
 MARKERS_FILE = os.path.join(CACHE_DIR, "markers.json")
 AUTO_MARKERS_FILE = os.path.join(CACHE_DIR, "auto_markers.json")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(SYNC_RANGE_DIR, exist_ok=True)
+os.makedirs(DEFAULT_DIFF_CACHE_DIR, exist_ok=True)
 
 vad_extractor = VADExtractor(LEXICON_PATH)
 esconv_loader = ESConvLoader(ESCONV_PATH)
@@ -77,6 +79,7 @@ STRATEGY_COLORS = {
 SYNC_RANGE_MEMORY_CACHE = {}
 SYNC_VIEW_CACHE_MEMORY = {}
 SYNC_CURRENT_POINTS_MEMORY_CACHE = {}
+DEFAULT_DIFF_MEMORY_CACHE = {}
 
 # 存储格式: { "conv_0": [{"turn":3,"speaker":"seeker","label":"..."}, ...] }
 def _ck(cid): return f"conv_{cid}"
@@ -165,6 +168,23 @@ def _compute_vad_results(utterances, granularity):
         v['turn_info'] = tm[i] if i < len(tm) and tm[i] else None
     return vad_r, 'word'
 
+def _vad_cache_path(conv_id, speaker, granularity):
+    suffix = '_sent' if granularity == 'sentence' else ''
+    return os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}{suffix}.json")
+
+def _load_vad_cache(conv_id, speaker, granularity):
+    cache_path = _vad_cache_path(conv_id, speaker, granularity)
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        results, metadata = vad_extractor.load_cache(cache_path)
+    except Exception:
+        return None
+    cached_gran = metadata.get('granularity')
+    if cached_gran and cached_gran != granularity:
+        return None
+    return results
+
 def build_conversation_cache(conv_id, speaker, granularity, persist=True):
     conv = esconv_loader.get_conversation(conv_id)
     if not conv:
@@ -178,10 +198,13 @@ def build_conversation_cache(conv_id, speaker, granularity, persist=True):
             'results': [], 'dialog': dialog, 'utterances': []
         }, meta
 
-    vad_results, actual_gran = _compute_vad_results(utterances, granularity)
+    cached_results = _load_vad_cache(conv_id, speaker, granularity)
+    if cached_results is not None:
+        vad_results, actual_gran = cached_results, granularity
+    else:
+        vad_results, actual_gran = _compute_vad_results(utterances, granularity)
     if persist:
-        suffix = '_sent' if actual_gran == 'sentence' else ''
-        cp = os.path.join(CACHE_DIR, f"vad_conv{conv_id}_{speaker}{suffix}.json")
+        cp = _vad_cache_path(conv_id, speaker, actual_gran)
         vad_extractor.save_cache(
             vad_results, cp,
             metadata={'conv_id': conv_id, 'speaker': speaker, 'granularity': actual_gran})
@@ -194,7 +217,11 @@ def build_conversation_cache(conv_id, speaker, granularity, persist=True):
     if bg_spk:
         bg_utts = esconv_loader.filter_utterances(dialog, bg_spk)
         if bg_utts:
-            bg_results, _ = _compute_vad_results(bg_utts, granularity)
+            cached_bg_results = _load_vad_cache(conv_id, bg_spk, granularity)
+            if cached_bg_results is not None:
+                bg_results = cached_bg_results
+            else:
+                bg_results, _ = _compute_vad_results(bg_utts, granularity)
             cache['bg_speaker'] = bg_spk
             cache['bg_results'] = bg_results
             cache['bg_utterances'] = bg_utts
@@ -250,6 +277,39 @@ def _compute_smoothed_utterance_curve(dim, ws, smooth_mode, cache):
     if len(utt_scores) < ws:
         return None, ws - 1
     return smooth_scores(utt_scores, ws), ws - 1
+
+def _compute_default_main_context_bundle(dim, cache):
+    utterances = cache.get('utterances', [])
+    results = cache.get('results', [])
+    if not utterances or not results:
+        return None
+    word_counts = [max(1, len(re.findall(r'\b[a-z]+\b', u['content'].lower()))) for u in utterances]
+    word_starts = []
+    cum = 0
+    for c in word_counts:
+        word_starts.append(cum)
+        cum += c
+
+    scores = np.array([r[dim] for r in results], dtype=float)
+    utt_turns = [r['turn_info']['turn_index'] if r.get('turn_info') else -1 for r in results]
+    xd_utt = [word_starts[i] + (word_counts[i] - 1) // 2 for i in range(len(results))]
+
+    ctx_scores, ctx_turns, xs_ctx = [], [], []
+    for i in range(SYNC_DEFAULT_WINDOW_SIZE - 1, len(utterances)):
+        combined = ' '.join(u['content'] for u in utterances[i - SYNC_DEFAULT_WINDOW_SIZE + 1:i + 1])
+        val = _score_text_block(combined, dim, True)
+        ctx_scores.append(0.0 if val is None else float(val))
+        ctx_turns.append(utterances[i]['turn_index'])
+        xs_ctx.append(word_starts[i])
+
+    return {
+        'utt_x': xd_utt,
+        'utt_y': scores.tolist(),
+        'utt_turns': utt_turns,
+        'ctx_x': xs_ctx,
+        'ctx_y': ctx_scores,
+        'ctx_turns': ctx_turns,
+    }
 
 def _build_turn_x_helpers(results, utterances, is_sent):
     if is_sent:
@@ -327,6 +387,76 @@ def _build_supporter_blocks(bg_utterances, seeker_turns):
             current.append(utt)
     supp_blocks.append(current)
     return supp_blocks
+
+def _default_diff_cache_path(conv_id):
+    return os.path.join(DEFAULT_DIFF_CACHE_DIR, f"default_diff_conv{conv_id}.json")
+
+def _serialize_default_diff_bundle(bundle):
+    return bundle
+
+def _restore_default_diff_bundle(bundle):
+    return bundle
+
+def _is_default_diff_mode(cache, ws, smooth_mode):
+    if not cache:
+        return False
+    return (
+        cache.get('speaker') == 'seeker' and
+        cache.get('granularity') == SYNC_DEFAULT_GRANULARITY and
+        int(ws) == SYNC_DEFAULT_WINDOW_SIZE and
+        smooth_mode == SYNC_DEFAULT_SMOOTH_MODE
+    )
+
+def _compute_default_diff_bundle(conv_id, persist=True):
+    conv_cache, _ = build_conversation_cache(conv_id, 'seeker', SYNC_DEFAULT_GRANULARITY, persist=persist)
+    if not conv_cache or not conv_cache.get('bg_utterances'):
+        return None
+    dims = {}
+    main_context = {}
+    for dim in ['valence', 'arousal', 'dominance']:
+        series = _compute_diff_series(dim, SYNC_DEFAULT_WINDOW_SIZE, SYNC_DEFAULT_SMOOTH_MODE, conv_cache)
+        if series is None:
+            return None
+        dims[dim] = series
+        main_context[dim] = _compute_default_main_context_bundle(dim, conv_cache)
+
+    current = _compute_current_sync_points_fresh(conv_cache, SYNC_DEFAULT_WINDOW_SIZE, SYNC_DEFAULT_SMOOTH_MODE)
+    if current is None:
+        return None
+
+    return {
+        'conv_id': conv_id,
+        'speaker': 'seeker',
+        'granularity': SYNC_DEFAULT_GRANULARITY,
+        'smooth_mode': SYNC_DEFAULT_SMOOTH_MODE,
+        'window_size': SYNC_DEFAULT_WINDOW_SIZE,
+        'dims': dims,
+        'main_context': main_context,
+        'current_sync': {
+            'points': current['points'].tolist(),
+            'turns': list(current['turns']),
+            'utterance_spans': current['utterance_spans'].tolist(),
+        },
+    }
+
+def _load_default_diff_bundle(conv_id, compute_if_missing=True):
+    if conv_id in DEFAULT_DIFF_MEMORY_CACHE:
+        return DEFAULT_DIFF_MEMORY_CACHE[conv_id]
+    cache_path = _default_diff_cache_path(conv_id)
+    if os.path.exists(cache_path):
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            bundle = _restore_default_diff_bundle(json.load(f))
+        DEFAULT_DIFF_MEMORY_CACHE[conv_id] = bundle
+        return bundle
+    if not compute_if_missing:
+        return None
+    bundle = _compute_default_diff_bundle(conv_id, persist=True)
+    if bundle is None:
+        return None
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(_serialize_default_diff_bundle(bundle), f, ensure_ascii=False, indent=2)
+    DEFAULT_DIFF_MEMORY_CACHE[conv_id] = bundle
+    return bundle
 
 def _compute_diff_series(dim, ws, smooth_mode, cache):
     empty = {'prev': None, 'next': None}
@@ -769,7 +899,7 @@ def _get_sync_view_cache(base_cache):
         SYNC_VIEW_CACHE_MEMORY[cache_key] = sync_cache
     return sync_cache
 
-def _compute_current_sync_points(cache, ws, smooth_mode):
+def _compute_current_sync_points_fresh(cache, ws, smooth_mode):
     if not cache or cache.get('speaker') != 'seeker':
         return None
     conv_id = cache.get('conv_id')
@@ -806,6 +936,18 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
     SYNC_CURRENT_POINTS_MEMORY_CACHE[cache_key] = current
     return current
 
+def _compute_current_sync_points(cache, ws, smooth_mode):
+    if _is_default_diff_mode(cache, ws, smooth_mode):
+        bundle = _load_default_diff_bundle(cache.get('conv_id'), compute_if_missing=True)
+        if bundle and bundle.get('current_sync'):
+            current_sync = bundle['current_sync']
+            return {
+                'points': np.asarray(current_sync['points'], dtype=float),
+                'turns': list(current_sync['turns']),
+                'utterance_spans': np.asarray(current_sync['utterance_spans'], dtype=float),
+            }
+    return _compute_current_sync_points_fresh(cache, ws, smooth_mode)
+
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "ESConv 对话情感弧线分析"
 
@@ -840,7 +982,8 @@ app.layout = html.Div([
                 options=[{'label': '词粒度', 'value': 'word'},
                          {'label': '句粒度', 'value': 'sentence',
                           'disabled': sent_predictor is None}],
-                value='word', labelStyle={'display': 'inline-block', 'marginRight': '8px'})
+                value='sentence' if sent_predictor is not None else 'word',
+                labelStyle={'display': 'inline-block', 'marginRight': '8px'})
         ], style={'display': 'inline-block', 'verticalAlign': 'top'}),
     ], style={'padding': '12px', 'backgroundColor': '#f8f9fa', 'borderRadius': '8px', 'marginBottom': '8px'}),
     html.Div([
@@ -855,7 +998,8 @@ app.layout = html.Div([
             dcc.RadioItems(id='smooth-mode-radio',
                 options=[{'label': '标准均值', 'value': 'avg'},
                          {'label': '上文窗口', 'value': 'context'}],
-                value='avg', labelStyle={'display': 'inline-block', 'marginRight': '10px'})
+                value='context' if sent_predictor is not None else 'avg',
+                labelStyle={'display': 'inline-block', 'marginRight': '10px'})
         ], style={'display': 'inline-block', 'verticalAlign': 'middle', 'marginLeft': '30px'}),
     ], style={'padding': '8px 12px'}),
     html.Div(id='meta-info', style={'padding': '8px 12px', 'backgroundColor': '#e9ecef',
@@ -1489,7 +1633,13 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None, sync_
                         height=220, margin=dict(l=40, r=20, t=35, b=25))
     if not cache or not cache.get('results') or not cache.get('bg_utterances'):
         return empty
-    diff_series = _compute_diff_series(dim, ws, smooth_mode, cache)
+    diff_series = None
+    if _is_default_diff_mode(cache, ws, smooth_mode):
+        bundle = _load_default_diff_bundle(cache.get('conv_id'), compute_if_missing=True)
+        if bundle:
+            diff_series = bundle.get('dims', {}).get(dim)
+    if diff_series is None:
+        diff_series = _compute_diff_series(dim, ws, smooth_mode, cache)
     if diff_series is None:
         return empty
 
@@ -1760,7 +1910,7 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
     inside_span = float(np.sum(utterance_spans * inside.astype(float)))
     sync_rate = (inside_span / total_span) if total_span > 0 else 0.0
 
-    tail_pct = dataset.get('tail_pct', 25)
+    display_tail_pct = int(round(float(dataset.get('tail_ratio', tail_ratio)) * 100))
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
         x=sampled[:, 0], y=sampled[:, 1], z=sampled[:, 2],
@@ -1800,7 +1950,7 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
 
     fig.update_layout(
         title=(
-            f"#{sync_cache.get('conv_id', '?')} | 同步范围 3D | 尾段 {tail_pct}% | "
+            f"#{sync_cache.get('conv_id', '?')} | 同步范围 3D | 尾段 {display_tail_pct}% | "
             f"同步率 {sync_rate:.1%}"
         ),
         scene=dict(
@@ -1815,10 +1965,11 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
         height=520, margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
 
-    kde_fig = _build_sync_kde_figure(dataset.get('kde_data', {}), points, inside, turns, sync_cache, tail_pct)
+    kde_fig = _build_sync_kde_figure(
+        dataset.get('kde_data', {}), points, inside, turns, sync_cache, display_tail_pct)
     sync_current_data = {
         'conv_id': sync_cache.get('conv_id'),
-        'tail_pct': tail_pct,
+        'tail_pct': display_tail_pct,
         'confidence_pct': confidence_pct,
         'inside_turns': [int(turns[i]) for i in np.where(inside)[0]],
         'outside_turns': [int(turns[i]) for i in np.where(~inside)[0]],
@@ -1833,7 +1984,7 @@ def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
             f"正态近似中心: μ=({mean[0]:.3f}, {mean[1]:.3f}, {mean[2]:.3f})",
             style={'marginRight': '18px'}),
         html.Span(
-            f"全数据统计: {dataset['used_conversations']} 个对话，尾段 {tail_pct}% ，"
+            f"全数据统计: {dataset['used_conversations']} 个对话，尾段 {display_tail_pct}% ，"
             f"{int(round(confidence_ratio * 100))}% 高斯椭球；"
             f"外围分位参考 V[{low[0]:.3f}, {high[0]:.3f}] "
             f"A[{low[1]:.3f}, {high[1]:.3f}] "
