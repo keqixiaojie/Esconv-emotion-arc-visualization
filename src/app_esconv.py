@@ -75,6 +75,8 @@ STRATEGY_COLORS = {
 }
 
 SYNC_RANGE_MEMORY_CACHE = {}
+SYNC_VIEW_CACHE_MEMORY = {}
+SYNC_CURRENT_POINTS_MEMORY_CACHE = {}
 
 # 存储格式: { "conv_0": [{"turn":3,"speaker":"seeker","label":"..."}, ...] }
 def _ck(cid): return f"conv_{cid}"
@@ -546,7 +548,7 @@ def _save_sync_dataset_to_disk(tail_ratio, ws, smooth_mode, granularity, result)
     with open(cache_path, 'w', encoding='utf-8') as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
 
-def _build_gaussian_ellipsoid(mean, cov, chi2_threshold):
+def _build_gaussian_ellipsoid(mean, cov, chi2_threshold, confidence_ratio):
     cov = np.asarray(cov, dtype=float)
     mean = np.asarray(mean, dtype=float)
     vals, vecs = np.linalg.eigh(cov)
@@ -563,7 +565,7 @@ def _build_gaussian_ellipsoid(mean, cov, chi2_threshold):
     ellipsoid = np.einsum('...i,ij->...j', sphere, transform.T) + mean
     return go.Surface(
         x=ellipsoid[:, :, 0], y=ellipsoid[:, :, 1], z=ellipsoid[:, :, 2],
-        name=f'{int(SYNC_CONFIDENCE * 100)}% 高斯椭球',
+        name=f'{int(round(confidence_ratio * 100))}% 高斯椭球',
         opacity=0.18, showscale=False,
         colorscale=[[0.0, '#66BB6A'], [1.0, '#2E7D32']],
         hoverinfo='skip')
@@ -758,13 +760,22 @@ def _get_sync_view_cache(base_cache):
         base_cache.get('granularity') == sync_granularity
     ):
         return base_cache
+    cache_key = (conv_id, sync_granularity)
+    if cache_key in SYNC_VIEW_CACHE_MEMORY:
+        return SYNC_VIEW_CACHE_MEMORY[cache_key]
     sync_cache, _ = build_conversation_cache(conv_id, 'seeker', sync_granularity, persist=False)
+    if sync_cache is not None:
+        SYNC_VIEW_CACHE_MEMORY[cache_key] = sync_cache
     return sync_cache
 
 def _compute_current_sync_points(cache, ws, smooth_mode):
     if not cache or cache.get('speaker') != 'seeker':
         return None
+    conv_id = cache.get('conv_id')
     actual_mode = 'context' if smooth_mode == 'context' and cache.get('granularity') == 'sentence' else 'avg'
+    cache_key = (conv_id, int(ws), actual_mode, cache.get('granularity'))
+    if cache_key in SYNC_CURRENT_POINTS_MEMORY_CACHE:
+        return SYNC_CURRENT_POINTS_MEMORY_CACHE[cache_key]
     utterances = cache.get('utterances', [])
     results = cache.get('results', [])
     is_sent = (cache.get('granularity') == 'sentence')
@@ -779,7 +790,7 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
     size = min(sizes)
     if size <= 0:
         return None
-    return {
+    current = {
         'points': np.column_stack([
             np.asarray(series['valence']['prev']['y'][:size], dtype=float),
             np.asarray(series['arousal']['prev']['y'][:size], dtype=float),
@@ -791,6 +802,8 @@ def _compute_current_sync_points(cache, ws, smooth_mode):
             for turn_idx in series['valence']['prev']['turns'][:size]
         ], dtype=float),
     }
+    SYNC_CURRENT_POINTS_MEMORY_CACHE[cache_key] = current
+    return current
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 app.title = "ESConv 对话情感弧线分析"
@@ -890,11 +903,21 @@ app.layout = html.Div([
                     marks={i: f"{i}%" for i in range(0, 55, 10)},
                     tooltip={"placement": "bottom", "always_visible": True})
             ], style={'width': '55%', 'display': 'inline-block', 'verticalAlign': 'middle'}),
+            html.Div([
+                html.Label("椭圆置信度:", style={'fontWeight': 'bold'}),
+                dcc.Slider(
+                    id='sync-confidence-slider', min=40, max=90, step=1,
+                    value=int(round(SYNC_CONFIDENCE * 100)),
+                    marks={40: '40%', 50: '50%', 67: '67%', 75: '75%', 90: '90%'},
+                    tooltip={"placement": "bottom", "always_visible": True})
+            ], style={'width': '38%', 'display': 'inline-block', 'verticalAlign': 'middle', 'marginLeft': '4%'}),
+        ], style={'padding': '8px 12px'}),
+        html.Div([
             html.Div(
                 "按状态差值图横坐标的最后 X% 截取；0% 表示不截尾，使用整段差值序列。"
                 "同步范围固定按默认模式计算：句粒度 / 上下文窗口 / W=2。",
-                style={'display': 'inline-block', 'marginLeft': '30px', 'fontSize': '12px', 'color': '#666'})
-        ], style={'padding': '8px 12px'}),
+                style={'fontSize': '12px', 'color': '#666'})
+        ], style={'padding': '0 12px 8px'}),
         dcc.Loading(type='circle', color='#666', children=[
             dcc.Graph(id='graph-sync-3d'),
             dcc.Graph(id='graph-sync-kde'),
@@ -907,6 +930,7 @@ app.layout = html.Div([
     dcc.Store(id='editing-target', data=None),
     dcc.Store(id='auto-marker-revision', data=0),
     dcc.Store(id='sync-dataset-store', data=None),
+    dcc.Store(id='sync-current-store', data=None),
     html.Div(id='label-modal-container', children=[
         html.Div(id='label-modal', children=[
             html.Div([
@@ -1458,7 +1482,7 @@ def _build_figure(dim, ws, smooth_mode, cache, markers, mf):
     return fig, f"✅ {len(results)}{unit_label} | W={ws} | 弧线{len(smooth)} | 拐点{shown}/{len(markers or [])} | {gran_tag}"
 
 
-def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
+def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None, sync_current_data=None):
     empty = go.Figure()
     empty.update_layout(title="需要选择单独说话者（Seeker 或 Supporter）",
                         height=220, margin=dict(l=40, r=20, t=35, b=25))
@@ -1488,6 +1512,28 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
             name='seeker − prev_supp（被引导）',
             line=dict(color=DIFF_RELATION_COLORS['prev'], width=2), marker=dict(size=5),
             text=prev_series['hover'], hoverinfo='text', customdata=prev_series['turns']))
+        outside_turns = set()
+        if (
+            sync_current_data and
+            sync_current_data.get('conv_id') == cache.get('conv_id') and
+            isinstance(sync_current_data.get('outside_turns'), list)
+        ):
+            outside_turns = set(sync_current_data['outside_turns'])
+        outside_x = []
+        outside_y = []
+        outside_hover = []
+        for x_val, y_val, turn in zip(prev_series['x'], prev_series['y'], prev_series['turns']):
+            if turn in outside_turns:
+                outside_x.append(x_val)
+                outside_y.append(y_val)
+                outside_hover.append(f"T[{turn}] 同步范围外")
+        if outside_x:
+            fig.add_trace(go.Scatter(
+                x=outside_x, y=outside_y, mode='markers',
+                name='同步范围外（prev）',
+                marker=dict(size=8, color='#C62828', symbol='circle',
+                            line=dict(width=1, color='white')),
+                hovertext=outside_hover, hoverinfo='text', showlegend=False))
     if next_series['x']:
         fig.add_trace(go.Scatter(
             x=next_series['x'], y=next_series['y'], mode='lines+markers',
@@ -1568,9 +1614,10 @@ def _build_diff_figure(dim, ws, smooth_mode, cache, markers=None, mf=None):
     Input('vad-cache-store', 'data'),
     Input('markers-store', 'data'),
     Input('marker-filter', 'value'),
-    Input('auto-marker-revision', 'data'))
-def update_diff_graphs(ws, smooth_mode, cache, markers, mf, _auto_rev):
-    figs = [_build_diff_figure(dim, ws, smooth_mode, cache, markers, mf)
+    Input('auto-marker-revision', 'data'),
+    Input('sync-current-store', 'data'))
+def update_diff_graphs(ws, smooth_mode, cache, markers, mf, _auto_rev, sync_current_data):
+    figs = [_build_diff_figure(dim, ws, smooth_mode, cache, markers, mf, sync_current_data)
             for dim in ['valence', 'arousal', 'dominance']]
     return figs[0], figs[1], figs[2]
 
@@ -1626,10 +1673,12 @@ def load_sync_dataset_store(tail_pct):
     Output('graph-sync-3d', 'figure'),
     Output('graph-sync-kde', 'figure'),
     Output('sync-info', 'children'),
+    Output('sync-current-store', 'data'),
     Input('sync-dataset-store', 'data'),
     Input('sync-tail-slider', 'value'),
+    Input('sync-confidence-slider', 'value'),
     Input('vad-cache-store', 'data'))
-def update_sync_view(sync_dataset_data, tail_pct, cache):
+def update_sync_view(sync_dataset_data, tail_pct, confidence_pct, cache):
     empty = go.Figure()
     empty.update_layout(
         title="同步范围三维分布",
@@ -1649,9 +1698,11 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
         empty_kde.add_annotation(
             text="请先选择一个对话后再查看 KDE 投影。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, empty_kde, "当前没有可用对话，无法显示同步范围。"
+        return empty, empty_kde, "当前没有可用对话，无法显示同步范围。", None
 
     tail_pct = tail_pct or 25
+    confidence_pct = confidence_pct or int(round(SYNC_CONFIDENCE * 100))
+    confidence_ratio = float(confidence_pct) / 100.0
     tail_ratio = tail_pct / 100.0
     cache_key = _sync_cache_key(tail_ratio, sync_ws, sync_mode, sync_granularity)
 
@@ -1667,7 +1718,7 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
         empty_kde.add_annotation(
             text="未找到 KDE 缓存，请先运行预计算脚本。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。"
+        return empty, empty_kde, f"未命中缓存：`{cache_key}`。请先预计算同步范围缓存。", None
 
     current = _compute_current_sync_points(sync_cache, sync_ws, sync_mode)
     if dataset is None or current is None:
@@ -1677,13 +1728,15 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
         empty_kde.add_annotation(
             text="当前参数下没有足够的差值点可用于 KDE 投影。",
             x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False, font=dict(size=14))
-        return empty, empty_kde, "差值点不足，无法计算同步范围。"
+        return empty, empty_kde, "差值点不足，无法计算同步范围。", None
 
-    low = np.asarray(dataset['low'], dtype=float)
-    high = np.asarray(dataset['high'], dtype=float)
     mean = np.asarray(dataset['mean'], dtype=float)
     cov = np.asarray(dataset['cov'], dtype=float)
-    chi2_threshold = float(dataset['chi2_threshold'])
+    sampled = np.asarray(dataset['sample_points'], dtype=float)
+    alpha = (1.0 - confidence_ratio) / 2.0
+    low = np.quantile(sampled, alpha, axis=0)
+    high = np.quantile(sampled, 1.0 - alpha, axis=0)
+    chi2_threshold = float(chi2.ppf(confidence_ratio, df=3))
     points = current['points']
     turns = current['turns']
     utterance_spans = np.asarray(current['utterance_spans'], dtype=float)
@@ -1692,7 +1745,6 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
     inside_span = float(np.sum(utterance_spans * inside.astype(float)))
     sync_rate = (inside_span / total_span) if total_span > 0 else 0.0
 
-    sampled = np.asarray(dataset['sample_points'], dtype=float)
     tail_pct = dataset.get('tail_pct', 25)
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
@@ -1700,7 +1752,7 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
         mode='markers', name='全数据尾段分布',
         marker=dict(size=3, color='rgba(120,120,120,0.30)'),
         hoverinfo='skip'))
-    fig.add_trace(_build_gaussian_ellipsoid(mean, cov, chi2_threshold))
+    fig.add_trace(_build_gaussian_ellipsoid(mean, cov, chi2_threshold, confidence_ratio))
     fig.add_trace(go.Scatter3d(
         x=points[:, 0], y=points[:, 1], z=points[:, 2],
         mode='lines', name='当前对话轨迹',
@@ -1749,6 +1801,12 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
         legend=dict(orientation='h', yanchor='bottom', y=0.98, xanchor='left', x=0))
 
     kde_fig = _build_sync_kde_figure(dataset.get('kde_data', {}), points, inside, turns, sync_cache, tail_pct)
+    sync_current_data = {
+        'conv_id': sync_cache.get('conv_id'),
+        'tail_pct': tail_pct,
+        'confidence_pct': confidence_pct,
+        'outside_turns': [int(turns[i]) for i in np.where(~inside)[0]],
+    }
 
     info = html.Div([
         html.Span(
@@ -1760,7 +1818,7 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
             style={'marginRight': '18px'}),
         html.Span(
             f"全数据统计: {dataset['used_conversations']} 个对话，尾段 {tail_pct}% ，"
-            f"{int(dataset['confidence'] * 100)}% 高斯椭球；"
+            f"{int(round(confidence_ratio * 100))}% 高斯椭球；"
             f"外围分位参考 V[{low[0]:.3f}, {high[0]:.3f}] "
             f"A[{low[1]:.3f}, {high[1]:.3f}] "
             f"D[{low[2]:.3f}, {high[2]:.3f}]；"
@@ -1768,7 +1826,7 @@ def update_sync_view(sync_dataset_data, tail_pct, cache):
             f"缓存键 {dataset.get('cache_key', 'n/a')}",
             style={'color': '#666'})
     ])
-    return fig, kde_fig, info
+    return fig, kde_fig, info, sync_current_data
 
 
 @app.callback(
